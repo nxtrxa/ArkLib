@@ -50,8 +50,8 @@ ARK_BEGIN
 	#define darray_back			  ark_darray_back
 #endif
 
-#ifndef ARK_DARRAY_DEFAULT_ALLOCATOR
-	#define ARK_DARRAY_DEFAULT_ALLOCATOR ARK_DEFAULT_ALLOCATOR
+#ifndef ARK_G_DARRAY_DEFAULT_ALLOCATOR
+	#define ARK_G_DARRAY_DEFAULT_ALLOCATOR ARK_DEFAULT_ALLOCATOR
 #endif
 
 #ifndef ARK_G_DARRAY_INIT_CAPACITY
@@ -125,8 +125,35 @@ static constexpr sz ARK_LC_DARRAY_MIN_ALIGNMENT = alignof (u0*) > alignof (sz) ?
 /*
  * Constructors / Destructors
  */
+
+/**
+ * @name `ark_make_darray`
+ * @kind  macro
+ * @brief creates an darray.
+ *
+ * @overload ark_make_darray(Type_)
+ * @overload ark_make_darray(Type_, Alloc_Or_Cap_)
+ * @overload ark_make_darray(Type_, Allocator_, Capacity_)
+ *
+ * @param Type_ <required> : type of darray DATA member
+ * @param Allocator_ <optional> [default : `ARK_G_DARRAY_DEFAULT_ALLOCATOR`] : specialized allocator. copied by value.
+ * @param Capacity_ <optional> [default : `ARK_DARRAY_INIT_CAPACITY`] : darray initial capacity.
+ * @param Alloc_Or_Cap_ <optional> : dispatches on type to `Allocator` or `Capacity_`
+ *
+ * @return ark_darray_expect_t : a pointer to the new allocated darray or an `ark_fault_t` on error
+ *
+ * `ARK_DARRAY_INIT_CAPACITY` inherits its value by the global macro `ARK_G_DARRAY_INIT_CAPACITY`.
+ * Therefore it can be redefined to the user desired value. Default is 16.
+ **/
 #define ark_make_darray(...) ark_pp_concat (ark_make_darray_, ark_pp_nargs (__VA_ARGS__)) (__VA_ARGS__)
 
+/*
+ * `ark_destroy_darray` macros overloads
+ *
+ * @param Da_ <required> : darray object. darray is already declared as a pointer so dont pass it by reference.
+ * @param Inner_Type_Destructor_ <on demand> : free-like function/macro that frees inner type allocations
+ * @param ITD_Args_ <on demand> : additional arguments passed to Inner_Type_Destructor_
+ */
 #define ark_destroy_darray(...) ark_pp_concat (ark_destroy_darray_, ark_pp_nargs (__VA_ARGS__)) (__VA_ARGS__)
 
 #define ark_darray_reserve(Da_, Capacity_)                                                                             \
@@ -156,13 +183,9 @@ static constexpr sz ARK_LC_DARRAY_MIN_ALIGNMENT = alignof (u0*) > alignof (sz) ?
 
 #define ark_darray_remove(...) ark_pp_concat (ark_darray_remove_, ark_pp_nargs (__VA_ARGS__)) (__VA_ARGS__)
 
-/*
- * `ark_make_darray` macros overloads
- */
-
 #define ark_make_darray_1(Type_)                                                                                       \
 	ark_make_darray_fn (                                                                                               \
-		ARK_DARRAY_DEFAULT_ALLOCATOR,                                                                                  \
+		ARK_G_DARRAY_DEFAULT_ALLOCATOR,                                                                                \
 		ARK_DARRAY_INIT_CAPACITY,                                                                                      \
 		sizeof (ark_darray_typename (Type_)),                                                                          \
 		sizeof (Type_),                                                                                                \
@@ -178,10 +201,6 @@ static constexpr sz ARK_LC_DARRAY_MIN_ALIGNMENT = alignof (u0*) > alignof (sz) ?
 	ark_make_darray_fn (                                                                                               \
 		(Allocator_), (Capacity_), sizeof (ark_darray_typename (Type_)), sizeof (Type_), ark_darray_alignment (Type_)  \
 	)
-
-/*
- * `ark_destroy_darray` macros overloads
- */
 
 #define ark_destroy_darray_1(Da_) ark_allocator_dealloc (Da_)
 

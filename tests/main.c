@@ -7,20 +7,20 @@ BEGIN
 static const cstring gs1 = "foo - baz - not - ark";
 static const cstring gs2 = " - - concat - ";
 
-ark_string_view ark_strtokenize (ark_string* s_, cstring tk_) {
-	static ark_string* curr;
-	if (s_) {
-		curr = s_;
-	}
-	CString	  s		  = curr->data;
-	sz		  tk_size = ARK_STRLEN (tk_);
-	Char*	  p		  = ark_strffo (*s_, tk_);
-	ptrdiff_t offset  = (ptrdiff_t)(p - s);
-	return (ark_string_view) {
-		.data = s,
-		.len  = offset,
-	};
-}
+// ark_string_view ark_strtokenize (ark_string* s_, cstring tk_) {
+// 	static ark_string* curr;
+// 	if (s_) {
+// 		curr = s_;
+// 	}
+// 	CString	  s		  = curr->data;
+// 	sz		  tk_size = ARK_STRLEN (tk_);
+// 	Char*	  p		  = ark_strffo (*s_, tk_);
+// 	ptrdiff_t offset  = (ptrdiff_t)(p - s);
+// 	return (ark_string_view) {
+// 		.data = s,
+// 		.len  = offset,
+// 	};
+// }
 
 int ___arklib__ () {
 	monotonic_buffer (mbuff);
@@ -34,16 +34,9 @@ int ___arklib__ () {
 
 	ark_darray (bstring) ss = ark_strsplit (MBA (mbuff), cs, "-");
 
-	// $foreach (s $in_darray (ss)) {
-	// 	// strtrim (s);
-	// 	printf (strfmt "\n", strarg (*s));
-	// }
-
-	const char* tok = strtok (cs.data, "-");
-
-	while (tok) {
-		printf ("%s\n", tok);
-		tok = strtok (nullptr, "-");
+	$foreach (s $in_darray (ss)) {
+		// strtrim (s);
+		printf (strfmt "\n", strarg (*s));
 	}
 
 	destroy_darray (ss, ark_destroy_bstring);

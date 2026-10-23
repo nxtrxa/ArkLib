@@ -74,6 +74,7 @@ ARK_CLASS (ark_fault) {
 	CString _file;
 	CString _func;
 	CString _ctx;
+	CString _msg;
 	u32		_line;
 	int		_errno;
 	int		_value;
@@ -98,7 +99,9 @@ ARK_CLASS (ark_fault) {
 		.unwrap = (Expected_),                                                                                         \
 	}
 
-#define ark_unexpected(Fault_)                                                                                         \
+#define ark_unexpected(...) ark_pp_concat (ark_unexpected_, ark_pp_nargs (__VA_ARGS__)) (__VA_ARGS__)
+
+#define ark_unexpected_1(Fault_)                                                                                       \
 	({                                                                                                                 \
 		ARK_FAULT = (ark_fault) {                                                                                      \
 			.to_str = #Fault_,                                                                                         \
@@ -106,6 +109,23 @@ ARK_CLASS (ark_fault) {
 			._func	= $fnsig,                                                                                          \
 			._line	= $line,                                                                                           \
 			._ctx	= ark_pp_stringfy (ARK_EXPECT_CONTEXT),                                                            \
+			._errno = errno,                                                                                           \
+			._value = ARK_FAULT_ID (Fault_),                                                                           \
+		};                                                                                                             \
+		(ark_expect_typename) {                                                                                        \
+			._fault = ARK_FAULT_ID (Fault_),                                                                           \
+		};                                                                                                             \
+	})
+
+#define ark_unexpected_2(Fault_, Msg_)                                                                                 \
+	({                                                                                                                 \
+		ARK_FAULT = (ark_fault) {                                                                                      \
+			.to_str = #Fault_,                                                                                         \
+			._file	= $file,                                                                                           \
+			._func	= $fnsig,                                                                                          \
+			._line	= $line,                                                                                           \
+			._ctx	= ark_pp_stringfy (ARK_EXPECT_CONTEXT),                                                            \
+			._msg	= (Msg_),                                                                                          \
 			._errno = errno,                                                                                           \
 			._value = ARK_FAULT_ID (Fault_),                                                                           \
 		};                                                                                                             \
