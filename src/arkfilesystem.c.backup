@@ -1,0 +1,194 @@
+#include "core/arkbasic_string.h"
+#include "io/arkfilesystem.h"
+
+ARK_BEGIN
+
+volatile i32 ark_fsys_err = 0;
+
+
+struct path {
+	ark_basic_string native_path;
+	int				 fd;
+	bool			 deleted;
+	bool			 is_file;
+};
+
+struct tree {
+	struct path root;
+	usz			dir_count;
+	struct path children[] __attr_counted_by__ (dir_count);
+};
+
+__attr_static_inline__ bool is_file (ark_basic_string path_) {
+	if (ARK_MEMCHR (path_.data, '.', path_.len)) {
+		return true;
+	} else {
+		return false;
+	}
+}
+
+#define NATIVE_PATH(Path_) ark_to_cstr ((Path_)->native_path)
+
+__attr_public_symbol__ ark_fsys_path* ark_fsys_make_path (CString path_) {
+	ark_fsys_path* p = ARK_TRY_MALLOC (sizeof (ark_fsys_path));
+	if (!p) {
+		ARK_WARN ("malloc failed");
+		return nullptr;
+	}
+
+	int fd = open (path_, O_RDWR | O_CREAT, S_IREAD | S_IWRITE);
+	if (fd == -1) {
+		ARK_WARN ("failed to open path: %s", path_);
+		return nullptr;
+	}
+
+	*p = (ark_fsys_path) {
+		.native_path = ark_make_basic_string (path_),
+		.fd			 = fd,
+		.is_file	 = is_file (p->native_path),
+	};
+	return p;
+}
+
+
+u0 ark_fsys_destroy_path (ark_fsys_path* __noalias__ path_) {
+	close (path_->fd);
+	ark_destroy_basic_string (&path_->native_path);
+	ARK_FREE (path_);
+}
+
+ark_string_view ark_fsys_fname (ark_fsys_path* __noalias__ path_) {
+	char* dot = ARK_MEMCHR (NATIVE_PATH (path_), '.', path_->native_path.len);
+	return ark_make_string_view (path_->native_path.data, path_->native_path.len - ARK_STRLEN (dot));
+}
+
+ark_string_view ark_fsys_fext (ark_fsys_path* __noalias__ path_) {
+	CString ext = ARK_MEMCHR (NATIVE_PATH (path_), '.', path_->native_path.len);
+	ext++;
+	return ark_make_string_view (ext);
+}
+
+int ark_fsys_frename (ark_fsys_path* __noalias__ path_, CString new_name_) {
+	if (rename (NATIVE_PATH (path_), new_name_) == -1) {
+		return -1;
+	}
+	ark_bstrcopy (&path_->native_path, new_name_);
+	return 0;
+}
+
+
+int ark_fsys_fdelete (ark_fsys_path* path_) {
+	if (remove (NATIVE_PATH (path_)) == -1) {
+		return -1;
+	}
+	path_->deleted = true;
+	return 1;
+}
+
+// struct fsys_file {
+// 	cstring		data;
+// 	int			fd;
+// 	struct stat sb;
+// };
+//
+// __attr_public_symbol__ struct fsys_file *ark_fsys_open (CString __noalias__ fpath_, int flags_, ...) {
+// 	struct fsys_file *f = ARK_TRY_MALLOC (sizeof (struct fsys_file));
+// 	if (!f) return nullptr;
+//
+// 	mode_t mode = 0;
+// 	if (flags_ & O_CREAT) {
+// 		va_list args;
+// 		va_start (args);
+// 		mode = va_arg (args, int);
+// 		va_end (args);
+// 	}
+// 	f->fd = open (fpath_, flags_, mode);
+// 	if (f->fd == -1) {
+// 		ARK_WARN ("failed to open file: %s", fpath_);
+// 		ARK_TRY_FREE (f);
+// 		return nullptr;
+// 	}
+// 	if (fstat (f->fd, &f->sb) == -1) {
+// 		ARK_WARN ("fstat failed");
+// 		close (f->fd);
+// 		ARK_TRY_FREE (f);
+// 		return nullptr;
+// 	}
+//
+// 	f->data = MAP_FAILED;
+//
+// 	int acc_mode = flags_ & O_ACCMODE;
+// 	int prot	 = 0;
+// 	if (acc_mode == O_RDONLY || acc_mode == O_RDWR) prot |= PROT_READ;
+// 	if (acc_mode == O_WRONLY || acc_mode == O_RDWR) prot |= PROT_WRITE;
+//
+// 	if (S_ISREG (f->sb.st_mode) && f->sb.st_size > 0 && (prot & PROT_READ)) {
+// 		f->data = mmap (nullptr, f->sb.st_size, prot, MAP_SHARED, f->fd, 0);
+// 		if (f->data == MAP_FAILED) {
+// 			ARK_WARN ("mmap failed, falling back to standard I/O");
+// 		}
+// 	}
+// 	return f;
+// }
+//
+// __attr_public_symbol__ u0 ark_fsys_close (struct fsys_file *__noalias__ f_) {
+// 	if (f_->data != MAP_FAILED) munmap (f_->data, f_->sb.st_size);
+// 	if (f_->fd != -1) close (f_->fd);
+// 	ARK_FREE (f_);
+// }
+//
+// __attr_public_symbol__ __attr_overloadable__ susz
+// ark_fsys_write (struct fsys_file *__noalias__ f_, ark_string_view buff_) {
+// 	if (f_->fd == -1) return -1;
+// 	susz bytes_written = write (f_->fd, buff_.data, buff_.len);
+// 	if (bytes_written == -1) {
+// 		ARK_WARN ("write failed");
+// 	} else {
+// 		fstat (f_->fd, &f_->sb);
+// 	}
+// 	return bytes_written;
+// }
+//
+// __attr_public_symbol__ __attr_overloadable__ susz ark_fsys_write (struct fsys_file *__noalias__ f_, cstring buff_) {
+// 	return ark_fsys_write (f_, ark_make_string_view (buff_));
+// }
+//
+// __attr_public_symbol__ susz ark_fsys_read (ark_fsys_file *__noalias__ f_, u0 *__noalias__ buff_, usz nbytes_) {
+// 	susz bytes_read = read (f_->fd, buff_, nbytes_);
+// 	if (bytes_read == -1) {
+// 		ARK_WARN ("failed to read");
+// 		return -1;
+// 	} else if (bytes_read == 0) {
+// 		ARK_WARN ("EOF");
+// 		return 0;
+// 	}
+//
+// 	if ((usz)bytes_read != nbytes_) {
+// 		ARK_WARN ("failed to read requested %zu bytes from file", (size_t)nbytes_);
+// 	}
+//
+// 	return bytes_read;
+// }
+//
+// __attr_public_symbol__ __attr_overloadable__ u0
+// ark_fsys_getc (struct fsys_file *__noalias__ f_, off_t offset_, ark_mody_fn_t mod_fn_) {
+// 	if (f_->sb.st_size <= offset_) {
+// 		ARK_WARN ("offset is greater file size");
+// 		return;
+// 	}
+// 	mod_fn_ (f_->data[offset_]);
+// }
+//
+// __attr_public_symbol__ __attr_overloadable__ char ark_fsys_getc (struct fsys_file *__noalias__ f_, off_t offset_) {
+// 	if (f_->sb.st_size <= offset_) {
+// 		ARK_WARN ("offset is greater than struct fsys_file size");
+// 		return -1;
+// 	}
+// 	return f_->data[offset_];
+// }
+//
+// __attr_public_symbol__ usz ark_fsys_fsizeof (struct fsys_file *__noalias__ f_) {
+// 	return (usz)f_->sb.st_size;
+// }
+//
+// ARK_END

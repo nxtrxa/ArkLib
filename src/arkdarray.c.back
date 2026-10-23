@@ -1,0 +1,150 @@
+#include "collections/arkdarray.h"
+
+/* Context string recorded in exceptions thrown from this translation unit. */
+#undef ARK_EXCEPTION_CTX
+#define ARK_EXCEPTION_CTX arkdarray
+
+ARK_BEGIN
+
+/*------------------------------------------------------------------------------------------------------
+ * Internal symbols
+ *
+ * All functions below treat the array through `ark_darray_t` (same leading
+ members as every
+ * ark_darray_def (T)). Only `size`, `capacity` and `allocator` are touched,
+ each through an lvalue
+ * of its own member type, so this is not a strict-aliasing problem. Element
+ storage is never
+ * accessed here.
+ -----------------------------------------------------------------------------------------------------*/
+
+/* 1.5x growth in integer math, never below what the caller needs,
+ * overflow-safe. */
+ARKINTERNAL __decl_nodiscard__ __decl_pure__ sz
+next_capacity (sz current_, sz needed_) {
+	sz grown;
+	if (current_ < ARK_LC_DARRAY_MIN_GROW) {
+		grown = ARK_LC_DARRAY_MIN_GROW;
+	} else if (ckd_mul (&grown, current_, ARK_LC_DARRAY_GROWTH_NUM)) {
+		grown = needed_;
+	} else {
+		grown /= ARK_LC_DARRAY_GROWTH_DEN;
+	}
+	return grown > needed_ ? grown : needed_;
+}
+
+/*------------------------------------------------------------------------------------------------------
+ * Functions
+ -----------------------------------------------------------------------------------------------------*/
+
+ARKEXPORT ark_darray_expect_t ark_darray_range_error_fn (u0) {
+	return ark_unexpected (
+		ARK_DARRAY, OUT_OF_RANGE, "darray: index or count out of range"
+	);
+}
+
+ARKEXPORT ark_darray_expect_t ark_darray_make_fn (
+	ark_allocator allocator_,
+	sz			  capacity_,
+	sz			  elem_sz_,
+	sz			  hdr_sz_,
+	sz			  alignment_
+) {
+	sz bytes;
+	if (!ark_calc_alloc_size (
+			&bytes, hdr_sz_, capacity_, elem_sz_, alignment_
+		)) {
+		return ark_unexpected (
+			ARK_DARRAY,
+			SIZE_OVERFLOW,
+			"darray: requested capacity overflows size_t"
+		);
+	}
+
+	ark_darray_t* da = ark_allocator_alloc_fn (allocator_, bytes, alignment_);
+	if (!da) {
+		return ark_unexpected (
+			ARK_DARRAY, OUT_OF_MEMORY, "darray: allocation failed"
+		);
+	}
+
+	/* Member-wise: `capacity` is the counted_by field, so set it before
+	 * anything touches `data`. */
+	da->capacity  = capacity_;
+	da->size	  = 0;
+	da->allocator = allocator_;
+	return ark_expected (ARK_DARRAY, (u0*)da);
+}
+
+ARKEXPORT ark_darray_expect_t ark_darray_reserve_fn (
+	u0* da_, sz capacity_, sz elem_sz_, sz hdr_sz_, sz alignment_
+) {
+	ark_darray_t* da = da_;
+
+	if (capacity_ == da->capacity) return ark_expected (ARK_DARRAY, da_);
+	if (capacity_ < da->size) {
+		return ark_unexpected (
+			ARK_DARRAY,
+			OUT_OF_RANGE,
+			"darray: cannot reserve below the current size"
+		);
+	}
+
+	sz old_bytes, new_bytes;
+	if (!ark_calc_alloc_size (
+			&old_bytes, hdr_sz_, da->capacity, elem_sz_, alignment_
+		)
+		|| !ark_calc_alloc_size (
+			&new_bytes, hdr_sz_, capacity_, elem_sz_, alignment_
+		)) {
+		return ark_unexpected (
+			ARK_DARRAY,
+			SIZE_OVERFLOW,
+			"darray: requested capacity overflows size_t"
+		);
+	}
+
+	/* The allocator is copied out first: the block may be freed by the call. */
+	const ark_allocator allocator = da->allocator;
+	u0*					moved	  = ark_allocator_realloc_fn (
+		allocator, da_, old_bytes, new_bytes, alignment_
+	);
+	if (!moved) {
+		/* The original block is untouched and still owned by the caller. */
+		return ark_unexpected (
+			ARK_DARRAY, OUT_OF_MEMORY, "darray: reallocation failed"
+		);
+	}
+
+	da			 = moved;
+	da->capacity = capacity_;
+	return ark_expected (ARK_DARRAY, moved);
+}
+
+ARKEXPORT ark_darray_expect_t ark_darray_grow_fn (
+	u0* da_, sz extra_, sz elem_sz_, sz hdr_sz_, sz alignment_
+) {
+	const ark_darray_t* da = da_;
+
+	sz needed;
+	if (ckd_add (&needed, da->size, extra_)) {
+		return ark_unexpected (
+			ARK_DARRAY, SIZE_OVERFLOW, "darray: size + extra overflows size_t"
+		);
+	}
+
+	return ark_darray_reserve_fn (
+		da_, next_capacity (da->capacity, needed), elem_sz_, hdr_sz_, alignment_
+	);
+}
+
+ARKEXPORT u0 ark_darray_destroy_fn (u0* da_) {
+	if (!da_) return;
+
+	const ark_darray_t* da = da_;
+	const ark_allocator allocator
+		= da->allocator; /* copy before the block disappears */
+	ark_allocator_dealloc_fn (allocator, da_);
+}
+
+ARK_END

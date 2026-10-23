@@ -1,0 +1,176 @@
+#ifndef ARK_DARRAY_H_
+#define ARK_DARRAY_H_
+
+#include <stdalign.h>
+#include <stdint.h>
+
+#include "interfaces/allocator.h"
+#include "interfaces/linear_iterator.h"
+#include "internals/argcount.h"
+#include "internals/arkdef.h"
+
+ARK_BEGIN
+
+#ifdef ARK_NAMESPACE
+	#define make_darray		ark_make_darray
+	#define destroy_darray	ark_destroy_darray
+	#define destroy_darrays ark_destroy_darrays
+	#define da_countof		ark_da_countof	  /* Number of elements */
+	#define da_capacityof	ark_da_capacityof /* Total capacity */
+	#define da_alignof		ark_da_alignof	  /* Inner type alignment */
+	#define da_sizeof		ark_da_sizeof	  /* Total size on bytes */
+	#define da_at			ark_da_at
+	#define darray			ark_darray
+	#define da_reserve		ark_da_reserve
+	#define da_resize		ark_da_resize
+	#define da_invariant	ark_da_invariant
+	#define da_push_back	ark_da_push_back
+	#define da_push_front	ark_da_push_front
+	#define da_pop_back		ark_da_pop_back
+	#define da_pop_front	ark_da_pop_front
+	#define da_sort			ark_da_sort
+	#define da_foreach		ark_da_foreach
+#endif
+
+#define ark_darray_t(Type_)                                                                                            \
+	__attr_aligned__ (__alignof__ (Type_)) struct ARK_CONCAT (ark_darray_, Type_) {                                    \
+		usz			   size;                                                                                           \
+		usz			   elem_sz;                                                                                        \
+		usz			   capacity;                                                                                       \
+		ark_allocator* allocator;                                                                                      \
+		Type_		   data[];                                                                                         \
+	}
+
+#define ark_darray(Type_) ark_darray_t (Type_)*
+
+typedef ark_darray_t (U0_p) ark_darray_t;
+typedef ark_darray (U0_p) ark_darray;
+typedef ark_fn (void, ark_data_dtor, u0*);
+
+typedef u0* ark_darray_p;
+typedef U0* ark_elem_p;
+
+/*
+ * ARKLIB DARRAY INTERNAL SYMBOLS
+ */
+
+/*
+ * ARKLIB DARRAY PUBLIC SYMBOLS
+ */
+
+#ifndef ARK_GL_DA_INITIAL_CAPACITY
+	#define ARK_GL_DA_INITIAL_CAPACITY __UINT64_C (32)
+#endif
+#ifndef ARK_GL_DA_GROWTH_FACTOR
+	#define ARK_GL_DA_GROWTH_FACTOR 2.0f
+#endif
+
+#ifndef ARK_GL_DA_SHRINK_FACTOR
+	#define ARK_GL_DA_SHRINK_FACTOR 0.5f
+#endif
+
+#ifndef ARK_GL_DA_SHRINK_THRESHOLD
+	#define ARK_GL_DA_SHRINK_THRESHOLD 0.25f
+#endif
+
+__attr_static_inline__ __attr_overloadable__ ark_darray_p ark__make_darray (usz elem_sz_);
+
+__attr_static_inline__ __attr_overloadable__ u0 ark_destroy_darray (ark_darray_p da_);
+
+static u0 ark_darray_reserve (ark_darray_p da_, usz expec_cap_);
+
+// #ifdef ARK_DARRAY_IMPLEMETATION
+
+__attr_overloadable__ ark_darray_p ark__make_darray (usz elem_sz_) {
+	ark_darray da
+		= ark_allocator_alloc (ARK_DEFAULT_ALLOCATOR, elem_sz_ * ARK_GL_DA_INITIAL_CAPACITY, __alignof__ (ark_darray));
+	*da = (ark_darray_t) {
+		.elem_sz   = elem_sz_,
+		.capacity  = ARK_GL_DA_INITIAL_CAPACITY,
+		.allocator = ark_allocator_dup (ARK_DEFAULT_ALLOCATOR),
+	};
+	return ARK_ASSUME_ALIGNED (da, __alignof__ (ark_darray));
+}
+
+__attr_overloadable__ u0 ark_destroy_darray (ark_darray_p da_) {
+	ark_allocator_free ((ark_darray)da_);
+}
+
+static u0 ark_darray_reserve (u0* da_, usz expec_cap_) {
+	ark_darray da = (ark_darray)(da_);
+	if (ARK_UNLIKELY (!da_ || expec_cap_ < da->capacity)) return;
+	const usz old_cap = da->capacity;
+	while (da->capacity < expec_cap_)
+		da->capacity *= ARK_GL_DA_GROWTH_FACTOR;
+	ark_allocator_realloc (da, old_cap, da->capacity, __alignof__ (ark_darray));
+	da_ = ARK_ASSUME_ALIGNED (da, __alignof__ (ark_darray));
+}
+
+__attr_overloadable__ u0 ark__darray_push_back (ark_darray_p da_, ark_elem_p elem_) {
+	ark_darray tmp = (ark_darray)da_;
+	if (tmp->size >= tmp->capacity) {
+		ark_darray_reserve (da_, tmp->capacity + 1);
+	}
+	tmp->data[tmp->size++] = elem_;
+}
+
+#define ark_darray_push_back(...) ARK_CONCAT (ark_darray_push_back_, ARK_NARGS (__VA_ARGS__)) (__VA_ARGS__)
+
+#define ark_darray_push_back_2(Da_, Elem_)                                                                             \
+	do {                                                                                                               \
+		if ((Da_)->size >= (Da_)->capacity) ark_darray_reserve (Da_, ((Da_)->size + 1) * ARK_GL_DA_GROWTH_FACTOR);     \
+		(Da_)->data[(Da_)->size++] = Elem_;                                                                            \
+	} while (0)
+
+#define ark_darray_push_back_3(Da_, Src_, Elems_count_)                                                                \
+	do {                                                                                                               \
+		if ((Da_)->size + Elems_count_ >= (Da_)->capacity) {                                                           \
+			ark_darray_reserve (Da_, (Da_)->size + Elems_count_);                                                      \
+		}                                                                                                              \
+		ARK_MEMCPY ((Da_)->data + (Da_)->size, Src_, Elems_count_ * ark_darray_elemszof (Da_));                        \
+		(Da_)->size += Elems_count_;                                                                                   \
+	} while (0)
+
+#define ark_darray_vpush_back(Da_, ...)                                                                                \
+	do {                                                                                                               \
+		ark_darray_typeof (Da_) tmp[] = {__VA_ARGS__};                                                                 \
+		ark_darray_push_back_3 (Da_, tmp, ARK_NARGS (__VA_ARGS__));                                                    \
+	} while (0)
+
+#define ark_darray_push_front(...) ARK_CONCAT (ark_darray_push_front_, ARK_NARGS (__VA_ARGS__)) (__VA_ARGS__)
+
+#define ark_darray_push_front_2(Da_, Elem_)                                                                            \
+	do {                                                                                                               \
+		ark_darray_push_back (Da_, Elem_);                                                                             \
+		ARK_MEMMOVE ((Da_)->data + 1, (Da_)->data, (Da_)->size);                                                       \
+		ark_darray_set (Da_, 0, Elem_);                                                                                \
+	} while (0)
+
+#define ark_darray_push_front_3(Da_, Src_, Elems_count_)                                                               \
+	do {                                                                                                               \
+		ark_darray_push_back (Da_, Src_, Elems_count_);                                                                \
+		ARK_MEMMOVE ((Da_)->data + Elems_count_, (Da_)->data, (Da_)->size);                                            \
+		ARK_MEMCPY ((Da_)->data, Src_, Elems_count_ * ark_darray_elemszof (Da_));                                      \
+	} while (0)
+
+#define ark_darray_vpush_front(Da_, ...)                                                                               \
+	do {                                                                                                               \
+		ark_darray_typeof (Da_) tmp[] = {__VA_ARGS__};                                                                 \
+		ark_darray_push_front (Da_, tmp, ARK_NARGS (__VA_ARGS__));                                                     \
+	} while (0)
+
+#define ark_darray_pop_back(Da_)                                                                                       \
+	do {                                                                                                               \
+		if (Da_ && (Da_)->size > 0) {                                                                                  \
+			(Da_)->data[(Da_)->size--] = 0;                                                                            \
+			if ((Da_)->size <= (Da_)->capacity * ARK_GL_DA_SHRINK_THRESHOLD) {                                         \
+				ark_darray_shrink (Da_, (Da_)->capacity * ARK_GL_DA_SHRINK_FACTOR);                                    \
+			}                                                                                                          \
+		}                                                                                                              \
+	} while (0)
+
+// #endif
+
+ARK_END
+
+#endif /* ARK_DARRAY_H_ */

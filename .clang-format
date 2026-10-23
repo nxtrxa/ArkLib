@@ -1,0 +1,84 @@
+BasedOnStyle: WebKit
+TabWidth: 4
+IndentWidth: 4
+UseTab: Always        # Never, ForIndentation, Always
+ContinuationIndentWidth: 4
+IndentCaseLabels: true
+IndentGotoLabels: true
+ColumnLimit: 120
+# SkipMacroDefinitionBody: true
+AllowShortFunctionsOnASingleLine: Empty   # None, Inline, Empty, All
+AllowShortIfStatementsOnASingleLine: Always
+AllowShortLoopsOnASingleLine: false
+BreakBeforeBraces: Attach   # Attach, Linux, Mozilla, Stroustrup, Allman, GNU
+BraceWrapping:
+  AfterCaseLabel:  false
+  AfterClass:      false
+  AfterControlStatement: Never
+  AfterEnum:       false
+  AfterExternBlock: false
+  AfterFunction:   false
+  AfterNamespace:  false
+  AfterObjCDeclaration: false
+  AfterStruct:     false
+  AfterUnion:      false
+  BeforeCatch:     false
+  BeforeElse:      false
+  BeforeLambdaBody: false
+  BeforeWhile:     false
+  IndentBraces:    false
+  SplitEmptyFunction: true
+  SplitEmptyRecord: true
+  SplitEmptyNamespace: true
+SpaceBeforeParens: Always   # Never, Always, ControlStatements
+SpacesInParentheses: false
+SpacesInSquareBrackets: false
+SpaceInEmptyParentheses: false
+SpacesInAngles: false
+SpaceBeforeAssignmentOperators: true
+PointerAlignment: Left    # Left, Right, Middle
+ReferenceAlignment: Pointer
+SortIncludes: true
+IncludeBlocks: Regroup   # Preserve, Merge, Regroup
+IncludeCategories:
+  - Regex: '^<.*>'
+    Priority: 1
+  - Regex: '^".*"'
+    Priority: 2
+BinPackParameters: false
+BinPackArguments: false
+AllowAllParametersOfDeclarationOnNextLine: true
+
+AlignConsecutiveAssignments:
+  Enabled:         true
+  AcrossEmptyLines: false
+  AcrossComments:  false
+  AlignCompound:   true
+  AlignFunctionDeclarations: true
+  AlignFunctionPointers: true
+  PadOperators:    true
+
+AlignConsecutiveDeclarations: true
+AlignOperands: true
+AlignTrailingComments: true
+AlignAfterOpenBracket: true
+BreakAfterOpenBracketFunction: true
+BreakBeforeCloseBracketFunction: true
+AlignConsecutiveMacros: true
+MaxEmptyLinesToKeep: 2
+KeepEmptyLinesAtTheStartOfBlocks: true
+IndentPPDirectives: BeforeHash   # None, AfterHash, BeforeHash
+BreakArrays: true
+
+ForEachMacros: ['$foreach', '$for']
+# AttributeMacros: ['ARK_ACENUM']
+
+Standard: c++20
+BreakConstructorInitializers: BeforeComma
+AllowShortLambdasOnASingleLine: All
+Cpp11BracedListStyle: true
+
+AlwaysBreakBeforeMultilineStrings: true
+PenaltyBreakBeforeFirstCallParameter: 47
+PenaltyReturnTypeOnItsOwnLine: 74
+PenaltyBreakAssignment: 7

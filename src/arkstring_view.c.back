@@ -1,0 +1,180 @@
+#include <ctype.h>
+
+#include "algorithms/bmh.h"
+
+ARK_BEGIN
+
+ARKEXPORT __decl_overloadable__ ark_string_view ark_make_string_view (CString __noalias__ cstr_) {
+	return (ark_string_view) {
+		.data = cstr_,
+		.len  = ARK_STRLEN (cstr_),
+	};
+}
+
+ARKEXPORT __decl_overloadable__ ark_string_view ark_make_string_view (CString __noalias__ cstr_, usz len) {
+	return (ark_string_view) {
+		.data = cstr_,
+		.len  = len,
+	};
+}
+
+ARKEXPORT __decl_overloadable__ u0 ark_svlchop (ark_string_view* __noalias__ sv_, usz n_) {
+	if (sv_->len < n_) n_ = sv_->len;
+	sv_->data += n_;
+	sv_->len  -= n_;
+}
+
+ARKEXPORT __decl_overloadable__ u0 ark_svlchop (ark_string_view* __noalias__ sv_) {
+	return ark_svlchop (sv_, 1);
+}
+
+ARKEXPORT __decl_overloadable__ u0 ark_svrchop (ark_string_view* __noalias__ sv_, usz n_) {
+	if (sv_->len < n_) n_ = sv_->len;
+	sv_->len -= n_;
+}
+
+ARKEXPORT __decl_overloadable__ u0 ark_svrchop (ark_string_view* __noalias__ sv_) {
+	return ark_svrchop (sv_, 1);
+}
+
+ARKEXPORT u0 ark_svltrim (ark_string_view* __noalias__ sv_) {
+	while (sv_->len > 0 && isspace ((uchar)*sv_->data)) {
+		ark_svlchop (sv_, 1);
+	}
+}
+ARKEXPORT u0 ark_svrtrim (ark_string_view* __noalias__ sv_) {
+	while (sv_->len > 0 && isspace ((uchar) * (sv_->data + sv_->len - 1))) {
+		ark_svrchop (sv_, 1);
+	}
+}
+
+ARKEXPORT u0 ark_svtrim (ark_string_view* __noalias__ sv_) {
+	ark_svltrim (sv_);
+	ark_svrtrim (sv_);
+}
+
+ARKEXPORT __decl_overloadable__ bool ark_svcomp (ark_string_view sv1_, ark_string_view sv2_) {
+	return (sv1_.len == sv2_.len && ARK_MEMCMP (sv1_.data, sv2_.data, sv1_.len) == 0);
+}
+
+ARKEXPORT __decl_overloadable__ bool ark_svcomp (ark_string_view sv_, CString cstr_) {
+	$assert_internal (sv_.data && cstr_ && "passed null string");
+	return (sv_.len == ARK_STRLEN (cstr_) && ARK_MEMCMP (sv_.data, cstr_, sv_.len) == 0);
+}
+
+/*
+ * Find first occurrence of NEEDLE in HAYSTACK.
+ */
+ARKEXPORT __decl_overloadable__ Char* ark_svffo (ark_string_view haystack_, ark_string_view needle_) {
+	$for (i, haystack_.len - needle_.len) {
+		if (ARK_MEMCMP (ark_string_ref (haystack_, i), needle_.data, needle_.len) == 0) {
+			return ark_string_ref (haystack_, i);
+		}
+	}
+	return nullptr;
+}
+
+ARKEXPORT __decl_overloadable__ Char* ark_svffo (ark_string_view haystack_, CString __noalias__ needle_) {
+	return ark_svffo (haystack_, ark_make_string_view (needle_));
+}
+
+/*
+ * Find last occurrence of NEEDLE in HAYSTACK.
+ */
+ARKEXPORT __decl_overloadable__ Char* ark_svflo (ark_string_view haystack_, ark_string_view needle_) {
+	$for_r (i, haystack_.len - needle_.len) {
+		if (ARK_MEMCMP (ark_string_ref (haystack_, i), needle_.data, needle_.len) == 0) {
+			return ark_string_ref (haystack_, i);
+		}
+	}
+	return nullptr;
+}
+
+ARKEXPORT __decl_overloadable__ Char* ark_svflo (ark_string_view haystack_, CString __noalias__ needle_) {
+	return ark_svflo (haystack_, ark_make_string_view (needle_));
+}
+
+ARKEXPORT __decl_overloadable__ ark_darray (ark_string_view)
+	ark_svsplit (ark_allocator* __noalias__ allocator_, ark_string_view sv_, ark_string_view pattern_) {
+	ark_darray (ark_string_view) ss = ark_make_darray (ark_string_view, allocator_, 0);
+	$assert_internal (ss && "failed to allocate dynamic array");
+	if (pattern_.len == 0 || *pattern_.data == '\0') {
+		ark_darray_push_back (ss, sv_);
+		return ss;
+	}
+	u32 occ_count			 = 0;
+	ark_darray (u32) offsets = ark_get_offsets (sv_, pattern_, &occ_count);
+	if (!offsets || occ_count == 0) {
+		ark_darray_push_back (ss, sv_);
+		return ss;
+	}
+	defer {
+		ark_destroy_darray (offsets);
+	};
+	ark_darray_reserve (ss, occ_count);
+	CString data  = sv_.data;
+	usz		len	  = sv_.len;
+	usz		start = 0;
+	for (usz i = 0; i < (usz)occ_count; ++i) {
+		usz				pos = ark_darray_at (offsets, i);
+		ark_string_view sv_ = ark_make_string_view (data + start, pos - start);
+		ark_darray_push_back (ss, sv_);
+		start = pos + pattern_.len;
+	}
+	if (start <= len) {
+		ark_string_view sv_ = ark_make_string_view (data + start, len - start);
+		ark_svtrim (&sv_);
+		ark_darray_push_back (ss, sv_);
+	}
+	return ss;
+}
+
+ARKEXPORT __decl_overloadable__ ark_darray (ark_string_view)
+	ark_svsplit (ark_allocator* __noalias__ allocator_, ark_string_view sv_, char delim_) {
+	ark_darray (ark_string_view) ss = ark_make_darray (ark_string_view, allocator_, 0);
+	$assert_internal (ss && "failed to allocate dynamic array");
+	CString data  = sv_.data;
+	usz		len	  = sv_.len;
+	usz		start = 0;
+	ark_darray_reserve (ss, 4);
+	while (1) {
+		Char* next = ARK_MEMCHR (data + start, delim_, len - start);
+		if (!next) {
+			ark_string_view sv_ = ark_make_string_view (data + start, len - start);
+			ark_darray_push_back (ss, sv_);
+			break;
+		}
+		usz				pos = next - data;
+		ark_string_view sv_ = ark_make_string_view (data + start, pos - start);
+		ark_darray_push_back (ss, sv_);
+		start = pos + 1;
+	}
+	return ss;
+}
+
+ARKEXPORT __decl_overloadable__ ark_darray (ark_string_view)
+	ark_svsplit (ark_allocator* __noalias__ allocator_, ark_string_view sv_, CString __nonnull__ pattern_) {
+	return ark_svsplit (allocator_, sv_, ark_make_string_view (pattern_));
+}
+
+ARKEXPORT __decl_overloadable__ ark_darray (ark_string_view)
+	ark_svsplit (ark_string_view sv_, CString __nonnull__ pattern_) {
+	return ark_svsplit (ARK_LIBC_ALLOCATOR, sv_, ark_make_string_view (pattern_));
+}
+
+ARKEXPORT __decl_overloadable__ ark_darray (ark_string_view) ark_svsplit (ark_string_view sv_, char delim_) {
+	return ark_svsplit (ARK_LIBC_ALLOCATOR, sv_, delim_);
+}
+
+ARKAPI ark_pair (ark_string_view) ark_svsplit_at (ark_string_view sv_, Char* at_) {
+	ptrdiff_t offset = (ptrdiff_t)(ark_string_end (sv_) - at_);
+	$assert (offset > 0 && offset < (susz)sv_.len && "AT should be in SV inner string bounds");
+	ark_string_view first  = ark_make_string_view (sv_.data, sv_.len - offset);
+	ark_string_view second = ark_make_string_view (at_ + 1, offset);
+	return (ark_pair (ark_string_view)) {
+		.first	= first,
+		.second = second,
+	};
+}
+
+ARK_END

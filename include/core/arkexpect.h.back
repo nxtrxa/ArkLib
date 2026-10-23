@@ -1,0 +1,241 @@
+/*
+ * Copyright (c) 2026 Murilo Gonzalez. All Rights Reserved.
+ *
+ *                      ARKLIB EXPECT
+ *
+ *  Declare a function that expects to return a specific
+ *  type or an enum type exception. use `ARK_DECL_FAULTS`
+ *  to declare
+ *
+ *  Zero-overhead model
+ *  -------------------
+ *  An ark_expect (Ctx, T) is just { T unwrap; int except; }: the payload plus a 4-byte code
+ *  (0 == success). For a pointer payload that is 16 bytes, returned in two registers; nothing is
+ *  built, copied or stored on the success path.
+ *
+ *  Everything else (exception name, message, context, file, line, errno) is diagnostics:
+ *    - the strings are `static const` data, one record per throw site (rodata, no runtime cost);
+ *    - throwing makes ONE cold call that remembers the site and errno in a thread-local slot;
+ *    - the full ark_exception object is only materialised on demand, in cold code
+ *      (ark_expect_exception / ark_catch).
+ *
+ *  Define ARK_FAULT_MINIMAL to drop even that: throw sites then emit no strings and no call,
+ *  the code is all that exists (ark_expect_exception then reports only the numeric value).
+ *
+ *  The thread-local slot behaves like errno: read it right after the failure, before another
+ *  throw on the same thread overwrites it. Messages must be string literals.
+ */
+
+#ifndef ARKLIB_CORE_EXPECT_H_
+#define ARKLIB_CORE_EXPECT_H_
+
+#import "collections/arkarray.h"
+#import "core/arkassoc_enum.h"
+#import "internals/arkdefs.h"
+
+ARK_BEGIN
+
+/*------------------------------------------------------------------------------------------------------
+ * Symbol aliases
+ -----------------------------------------------------------------------------------------------------*/
+#ifdef ARK_NAMESPACE
+	#define DECL_FAULTS		 ARK_DECL_FAULTS
+	#define FAULT_ZERODIV	 ARK_FAULT_ZERODIV
+	#define FAULT_NULLPTR	 ARK_FAULT_NULLPTR
+	#define FAULT_COUNT		 ARK_FAULT_COUNT
+	#define PANIC_ON_FAULT	 ARK_PANIC_ON_FAULT
+	#define LOG_FAULT		 ARK_LOG_FAULT
+	#define exception		 ark_exception
+	#define expect			 ark_expect
+	#define expected		 ark_expected
+	#define unexpected		 ark_unexpected
+	#define expect_exception ark_expect_exception
+	#define unwrap_or		 ark_unwrap_or
+#endif
+
+/*
+ * Declare an enum of exceptions that belong to a specific context.
+ * each exception is concatenated with the context.
+ * .e.g
+ * ARK_DECL_FAULTS(CONTEXT, EXCEPT_1, EXCEPT_2);
+ * expands to:
+ * typedef enum {
+ *  CONTEXT_EXCEPT_1,
+ *  CONTEXT_EXCEPT_2,
+ * } CONTEXT_FAULTS;
+ */
+
+#define __DECL_FAULT_(Ctx_, Fault_)	  ark_pp_concat (Ctx_, _, Fault_),
+#define __DECL_FAULTS_SEQ_(Ctx_, ...) ark_pp_arg_foreach (__DECL_FAULT_, Ctx_, __VA_ARGS__)
+
+#define ARK_DECL_FAULTS(Ctx_, ...) enum ark_pp_concat (Ctx_, _FAULTS) { __DECL_FAULTS_SEQ_ (Ctx_, __VA_ARGS__) }
+
+#define ARK_FAULT_ID(Ctx_, Fault_) ark_pp_concat (Ctx_, _, Fault_)
+
+#define ark_expect_typename(Ctx_) struct ark_pp_concat (Ctx_, _FAULT)
+
+#define ark_exception_typename(Ctx_) enum ark_pp_concat (Ctx_, _FAULTS)
+
+static constexpr int ARK_FAULT_SUCCESS = 0;
+
+/* Materialised exception: built on demand in cold code, never part of a return value. */
+ARK_CLASS (ark_exception) {
+	CString _to_str;
+	CString _msg;
+	CString _ctx;
+	CString _file;
+	int		_value;
+	int		_errno;
+	u32		_line;
+};
+
+/* One immutable record per throw site (static const, lives in rodata). */
+typedef struct {
+	CString _to_str;
+	CString _msg;
+	CString _ctx;
+	CString _file;
+	u32		_line;
+} __ark_exception_site_t_;
+
+/* What the last throw on this thread recorded (written only on the failure path). */
+typedef struct {
+	const __ark_exception_site_t_* _site;
+	int							   _value;
+	int							   _errno;
+} __ark_exception_last_t_;
+
+/* The whole success-path cost model: payload + int. */
+#define ark_expect(Ctx_, Type_)                                                                                        \
+	ark_expect_typename (Ctx_) {                                                                                       \
+		Type_ unwrap;                                                                                                  \
+		ark_exception_typename (Ctx_) except;                                                                          \
+	}
+
+#define ark_expected(Ctx_, ExpecValue_)                                                                                \
+	(ark_expect_typename (Ctx_)) {                                                                                     \
+		.unwrap = ark_pp_unwrap (ExpecValue_)                                                                          \
+	}
+
+/*
+ * ark_unexpected (Ctx, Value)           ark_unexpected (Ctx, Value, "literal message")
+ * Evaluates to the failed ark_expect of type Ctx.
+ */
+#define ark_unexpected(...) ark_pp_concat (__ark_unexpected_, ark_pp_nargs (__VA_ARGS__)) (__VA_ARGS__)
+
+#define ark_expect_ok(Expect_)	   ((Expect_).except == ARK_FAULT_SUCCESS)
+#define ark_expect_failed(Expect_) (!ark_expect_ok (Expect_))
+
+/* Cold: builds the full exception object for a failed expect (name, message, ctx, file, line,
+ * errno). Use for logging / panicking; the expect itself stays 4 bytes of error state. */
+#define ark_expect_exception(Expect_) ark_exception_from ((Expect_).except)
+
+/*
+ * `CATCH` and `THROW` are prefixed with `$` to not alias C++ names
+ */
+
+/*
+ * `CATCH` (call, e, handler...)
+ * Evaluates call. On failure `e` (an ark_exception, materialised lazily in the cold branch) is
+ * visible to the handler statements; if the handler falls through the program traps.
+ * On success the expression is the unwrapped payload.
+ */
+#define $catch(FnCall_, ExceptObj_, ...) __ark_catch_ (ark_pp_unique_id (ark_c_), FnCall_, ExceptObj_, __VA_ARGS__)
+
+#define $throw(...) ark_pp_concat (__ark_throw_, ark_pp_nargs (__VA_ARGS__)) (__VA_ARGS__)
+
+#define ark_unwrap_or(FnCall_, FallBackValue_) __ark_unwrap_or_ (ark_pp_unique_id (ark_u_), FnCall_, FallBackValue_)
+
+/* Except_ is an ark_exception: ARK_PANIC_ON_FAULT (ark_expect_exception (r)). */
+#define ARK_PANIC_ON_FAULT(Except_)                                                                                    \
+	ARK_PANIC (                                                                                                        \
+		"[FAULT TRIGGERED] : %s\n\t%s : \"%s\"\n\tAt: %s:%u\n\terrno: %s",                                             \
+		(Except_)._to_str,                                                                                             \
+		(Except_)._ctx,                                                                                                \
+		(Except_)._msg,                                                                                                \
+		(Except_)._file,                                                                                               \
+		(Except_)._line,                                                                                               \
+		(Except_)._errno ? strerror ((Except_)._errno) : "not set"                                                     \
+	)
+
+#define ARK_LOG_FAULT(Except_)                                                                                         \
+	ARK_WARN (                                                                                                         \
+		"[FAULT TRIGGERED] : %s\n\t%s: %s\n\tAt: %s:%u\n\terrno: %s",                                                  \
+		(Except_)._to_str,                                                                                             \
+		(Except_)._ctx,                                                                                                \
+		(Except_)._msg,                                                                                                \
+		(Except_)._file,                                                                                               \
+		(Except_)._line,                                                                                               \
+		(Except_)._errno ? strerror ((Except_)._errno) : "not set"                                                     \
+	)
+
+/*------------------------------------------------------------------------------------------------------
+ * Internal symbols
+ -----------------------------------------------------------------------------------------------------*/
+
+#ifdef ARK_FAULT_MINIMAL
+
+	/* Code only: no strings, no call, no thread-local write. */
+	#define __ark_unexpected_(Ctx_, UnexpecValue_, Msg_)                                                               \
+		((ark_expect_typename (Ctx_)) {.except = ARK_FAULT_ID (Ctx_, UnexpecValue_)})
+
+#else
+
+	/* The site record is static const data; the only runtime work is one cold call. */
+	#define __ark_unexpected_(Ctx_, UnexpecValue_, Msg_)                                                               \
+		({                                                                                                             \
+			static const __ark_exception_site_t_ __ark_site_ = {                                                       \
+				._to_str = #UnexpecValue_,                                                                             \
+				._msg	 = (Msg_),                                                                                     \
+				._ctx	 = ark_pp_stringfy (Ctx_),                                                                     \
+				._file	 = __FILE__,                                                                                   \
+				._line	 = __LINE__,                                                                                   \
+			};                                                                                                         \
+			ark_exception_raise (&__ark_site_, ARK_FAULT_ID (Ctx_, UnexpecValue_));                                    \
+			(ark_expect_typename (Ctx_)) {.except = ARK_FAULT_ID (Ctx_, UnexpecValue_)};                               \
+		})
+
+#endif
+
+#define __ark_unexpected_2(Ctx_, UnexpecValue_) __ark_unexpected_ (Ctx_, UnexpecValue_, "")
+
+#define __ark_unexpected_3(Ctx_, UnexpecValue_, Msg_) __ark_unexpected_ (Ctx_, UnexpecValue_, Msg_)
+
+#define __ark_throw_2_(Ctx_, ErrValue_) return ark_unexpected (Ctx_, ErrValue_)
+
+#define __ark_throw_3_(Ctx_, ErrValue_, Msg_) return ark_unexpected (Ctx_, ErrValue_, Msg_)
+
+#define __ark_catch_(Id_, FnCall_, ExceptObj_, ...)                                                                    \
+	({                                                                                                                 \
+		auto Id_ = (FnCall_);                                                                                          \
+		if (ARK_UNLIKELY (!ark_expect_ok (Id_))) {                                                                     \
+			__decl_unused__ auto ExceptObj_ = ark_expect_exception (Id_);                                              \
+			__VA_ARGS__;                                                                                               \
+			ARK_TRAP ();                                                                                               \
+		}                                                                                                              \
+		Id_.unwrap;                                                                                                    \
+	})
+
+#define __ark_unwrap_or_(Id_, FnCall_, FallBackValue_)                                                                 \
+	({                                                                                                                 \
+		auto Id_ = (FnCall_);                                                                                          \
+		ark_expect_ok (Id_) ? Id_.unwrap : (FallBackValue_);                                                           \
+	})
+
+/*------------------------------------------------------------------------------------------------------
+ * Functions (arkexpect.c)
+ -----------------------------------------------------------------------------------------------------*/
+
+/* Thread-local record of the last throw (errno-style). Written only by ark_exception_raise. */
+ARKAPI thread_local __ark_exception_last_t_ ark_exception_last;
+
+/* Cold. Remembers the site and errno for the throw in progress. */
+ARKAPI __decl_cold__ u0 ark_exception_raise (const __ark_exception_site_t_* site_, int value_) __attr_noexcept__;
+
+/* Cold. Materialises the exception object for `value_` from the last recorded throw. If the
+ * recorded value does not match (or ARK_FAULT_MINIMAL), only `_value` is meaningful. */
+ARKAPI __decl_cold__ ark_exception ark_exception_from (int value_) __attr_noexcept__;
+
+ARK_END
+
+#endif /* ARKLIB_CORE_EXPECT_H_ */

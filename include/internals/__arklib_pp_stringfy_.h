@@ -1,0 +1,6 @@
+#ifndef ARK_INTERNALS_PP_STRINGFY_H_
+#define ARK_INTERNALS_PP_STRINGFY_H_
+
+#define __STRINGFY_(X_) #X_
+
+#endif /* ARK_INTERNALS_PP_STRINGFY_H_ */

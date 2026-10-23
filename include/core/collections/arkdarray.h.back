@@ -1,0 +1,838 @@
+#ifndef ARK_DARRAY_H_
+#define ARK_DARRAY_H_
+
+#include "allocators/arklibc_allocator.h"
+#include "core/arkexpect.h"
+
+ARK_BEGIN
+
+/*------------------------------------------------------------------------------------------------------
+ * Overview
+ *
+ * Header-prefixed dynamic array. One allocation: [size | capacity | allocator |
+ * data...]. The variable you hold is a pointer to that block, so `ark_darray
+ * (int) da` is already a pointer.
+ *
+ * Error model: every fallible operation yields ark_darray_expect_t (ark_expect,
+ * C3-optional style). Payload is always a u0*:
+ *   - the (possibly relocated) array for make / reserve / shrink_to_fit /
+ * resize / erase / swap_remove
+ *   - a pointer to the affected element for push_back / insert / append / get /
+ * pop_back Element pointers are invalidated by the next mutating call.
+ *
+ *   ark_darray (int) da = ark_catch (ark_make_darray (int), e, return);
+ *   ark_darray_expect_t r = ark_darray_push_back (da, 42);
+ *   if (ark_expect_failed (r)) { ... }
+ *
+ * Performance notes
+ *   - Fast path of push_back / insert is: one compare, one store, one
+ * increment. The grow path is an out-of-line, cold call.
+ *   - Every data access goes through __ark_darray_data_, which tells the
+ * optimizer (via ARK_ASSUME_ALIGNED) the true alignment of `data`, so
+ * vectorised loops / memcpy / memmove / memset can use aligned moves. The
+ * alignment is the largest one provable at compile time from the struct layout.
+ *   - Header and data are 16-byte aligned at minimum
+ * (ARK_LC_DARRAY_MIN_ALIGNMENT).
+ *   - Mutating macros take an lvalue darray (they may re-point it after a
+ * reallocation); removal, access and algorithm macros accept rvalues. Simple
+ * accessors (size, capacity, empty, null) evaluate their argument more than
+ * once: pass side-effect-free expressions.
+ *----------------------------------------------------------------------------------------------------*/
+
+/*------------------------------------------------------------------------------------------------------
+ * Symbol aliases
+ -----------------------------------------------------------------------------------------------------*/
+#ifdef ARK_NAMESPACE
+	#define darray				 ark_darray
+	#define darray_t			 ark_darray_t
+	#define class_darray		 ark_class_darray
+	#define make_darray			 ark_make_darray
+	#define destroy_darray		 ark_destroy_darray
+	#define darray_elemtypeof	 ark_darray_elemtypeof
+	#define darray_elemszof		 ark_darray_elemszof
+	#define darray_alignof		 ark_darray_alignof
+	#define is_darray_null		 ark_is_darray_null
+	#define is_darray_empty		 ark_is_darray_empty
+	#define darray_size			 ark_darray_size
+	#define darray_capacity		 ark_darray_capacity
+	#define darray_data			 ark_darray_data
+	#define darray_begin		 ark_darray_begin
+	#define darray_end			 ark_darray_end
+	#define darray_clear		 ark_darray_clear
+	#define darray_reserve		 ark_darray_reserve
+	#define darray_shrink_to_fit ark_darray_shrink_to_fit
+	#define darray_resize		 ark_darray_resize
+	#define darray_push_back	 ark_darray_push_back
+	#define darray_append		 ark_darray_append
+	#define darray_insert		 ark_darray_insert
+	#define darray_insert_n		 ark_darray_insert_n
+	#define darray_pop_back		 ark_darray_pop_back
+	#define darray_pop_back_or	 ark_darray_pop_back_or
+	#define darray_erase		 ark_darray_erase
+	#define darray_swap_remove	 ark_darray_swap_remove
+	#define darray_ptr			 ark_darray_ptr
+	#define darray_at			 ark_darray_at
+	#define darray_set			 ark_darray_set
+	#define darray_get			 ark_darray_get
+	#define darray_front		 ark_darray_front
+	#define darray_back			 ark_darray_back
+	#define darray_sort			 ark_darray_sort
+	#define darray_contains		 ark_darray_contains
+#endif
+
+/*------------------------------------------------------------------------------------------------------
+ * Constants
+ *
+ * Integer arithmetic only (f32 factors lose precision above 2^24 elements).
+ -----------------------------------------------------------------------------------------------------*/
+static constexpr sz ARK_LC_DARRAY_INITIAL_CAPACITY = 16;
+static constexpr sz ARK_LC_DARRAY_MIN_GROW		   = 4;
+static constexpr sz ARK_LC_DARRAY_GROWTH_NUM = 3; /* growth = 3/2 = 1.5x */
+static constexpr sz ARK_LC_DARRAY_GROWTH_DEN = 2;
+
+/* Header + data base alignment. The header is 32 bytes (size, capacity,
+ * allocator), so `data` lands on a 16-byte boundary for every element type with
+ * alignment <= 32. */
+static constexpr sz ARK_LC_DARRAY_MIN_ALIGNMENT = 16;
+
+$static_assert (
+	ARK_LC_DARRAY_MIN_ALIGNMENT >= alignof (u0*)
+		&& ARK_LC_DARRAY_MIN_ALIGNMENT >= alignof (sz),
+	"darray: minimum alignment must cover the header members"
+);
+
+#ifndef ARK_DARRAY_DEFAULT_ALLOCATOR
+	#define ARK_DARRAY_DEFAULT_ALLOCATOR ARK_DEFAULT_ALLOCATOR
+#endif
+
+/* Sentinel for "insert at the end" in the internal insert macros. */
+static constexpr sz __ark_darray_at_end__ = (sz)-1;
+
+/*------------------------------------------------------------------------------------------------------
+ * Helpers for type definitions
+ -----------------------------------------------------------------------------------------------------*/
+#define __ark_darray_alignment_(Type_)                                         \
+	((alignof (Type_) >= ARK_LC_DARRAY_MIN_ALIGNMENT)                          \
+		 ? alignof (Type_)                                                     \
+		 : ARK_LC_DARRAY_MIN_ALIGNMENT)
+
+/*------------------------------------------------------------------------------------------------------
+ * Type definitions
+ -----------------------------------------------------------------------------------------------------*/
+ARK_DECL_EXCEPTIONS (ARK_DARRAY, OUT_OF_MEMORY, SIZE_OVERFLOW, OUT_OF_RANGE);
+
+typedef ark_expect (ARK_DARRAY, u0*) ark_darray_expect_t;
+
+/*
+ * The alignment attribute goes BETWEEN `struct` and the tag so it applies to
+ * the type. Type_ must be a single identifier (typedef multi-word / pointer
+ * types first): it is pasted into the tag. `counted_by (capacity)`: the FAM has
+ * `capacity` valid elements, `size` of them live.
+ */
+#define ark_darray_def(Type_)                                                  \
+	struct __decl_aligned__ (__ark_darray_alignment_ (Type_))                  \
+		ark_pp_concat (ark_darray_of_, Type_) {                                \
+		sz			  size;                                                    \
+		sz			  capacity;                                                \
+		ark_allocator allocator;                                               \
+		Type_		  data[] __attr_counted_by__ (capacity);                   \
+	}
+
+/* Always a pointer: a struct with a FAM must live in one allocation. (C23:
+ * re-declaring the same tag with identical content is allowed.) */
+#define ark_darray(Type_) ark_darray_def (Type_)*
+
+/* Type-erased view used by the out-of-line functions. Same leading members as
+ * every darray. */
+typedef ark_darray_def (u0_p) ark_darray_t;
+
+typedef ark_darray (u0_p) ark_darray;
+
+$static_assert (
+	offsetof (ark_darray_t, data) % ARK_LC_DARRAY_MIN_ALIGNMENT == 0,
+	"darray: data must start on a MIN_ALIGNMENT boundary"
+);
+
+/*------------------------------------------------------------------------------------------------------
+ * Public symbols
+ -----------------------------------------------------------------------------------------------------*/
+
+/* Introspection
+ * ----------------------------------------------------------------------------------*/
+
+#define ark_darray_elemtypeof(Da_) typeof_unqual ((Da_)->data[0])
+#define ark_darray_elemszof(Da_)   sizeof ((Da_)->data[0])
+#define ark_darray_alignof(Da_)	   alignof (typeof ((Da_)->data[0]))
+
+#define ark_is_darray_null(Da_)	 (!(Da_))
+#define ark_is_darray_empty(Da_) (!(Da_) || (Da_)->size == 0)
+
+#define ark_darray_size(Da_)	 ((Da_) ? (Da_)->size : 0)
+#define ark_darray_capacity(Da_) ((Da_) ? (Da_)->capacity : 0)
+
+/* Aligned element pointer (nullptr for a NULL darray). begin/end are NULL
+ * tolerant so
+ * `$foreach (e $in_darray (da))` on a NULL / failed darray is a no-op. */
+#define ark_darray_data(Da_)                                                   \
+	__ark_darray_ids1_ (__ark_darray_data_checked_, Da_)
+
+#define ark_darray_begin(Da_) ark_darray_data (Da_)
+
+#define ark_darray_end(Da_) __ark_darray_ids1_ (__ark_darray_end_, Da_)
+
+#define $in_darray(Da_)	  ARK_DECL_IN_MACRO ((Da_), ark_darray)
+#define $from_darray(Da_) ARK_DECL_FROM_MACRO ((Da_), ark_darray)
+
+/* Construction / destruction
+ * ---------------------------------------------------------------------*/
+
+/*
+ * ark_make_darray (T)                  default allocator, default capacity
+ * ark_make_darray (T, allocator|cap)   (selected by type with _Generic)
+ * ark_make_darray (T, allocator, cap)
+ * Returns ark_darray_expect_t (payload: the new array).
+ */
+#define ark_make_darray(...)                                                   \
+	__ark_darray_dispatch_ (__ark_make_darray_, __VA_ARGS__)
+
+/*
+ * Destroys the darray and sets the variable to nullptr (no dangling pointer /
+ * double free). Da_ must be an lvalue. NULL-safe. The 2-argument form first
+ * runs Dtor_ (elem_ptr) on every live element.
+ */
+#define ark_destroy_darray(...)                                                \
+	__ark_darray_dispatch_ (__ark_destroy_darray_, __VA_ARGS__)
+
+/*
+ * RAII declaration:  ark_class_darray (int, nums);
+ * On allocation failure `nums` is nullptr (check with ark_is_darray_null); use
+ * ark_make_darray + ark_catch when you want to handle the exception explicitly.
+ */
+#define ark_class_darray(Type_, Da_, ...)                                      \
+	__attr_cleanup__ (ark_darray_cleanup_fn) ark_darray (Type_)                \
+		Da_ = ark_unwrap_or (                                                  \
+			ark_make_darray (Type_ __VA_OPT__ (, ) __VA_ARGS__), nullptr       \
+		)
+
+/* Capacity
+ * ---------------------------------------------------------------------------------------*/
+
+/* size := 0. Keeps the allocation. NULL-safe. Does not run element destructors.
+ */
+#define ark_darray_clear(Da_) __ark_darray_ids1_ (__ark_darray_clear__, Da_)
+
+/* Ensure capacity >= Cap_ (never shrinks). Payload: the (possibly relocated)
+ * array. */
+#define ark_darray_reserve(Da_, Cap_)                                          \
+	__ark_darray_ids3_ (__ark_darray_reserve__, Da_, Cap_)
+
+/* capacity := size. Explicit: pops never reallocate. */
+#define ark_darray_shrink_to_fit(Da_)                                          \
+	__ark_darray_ids2_ (__ark_darray_shrink__, Da_)
+
+/* Grows (zero-filling new elements) or truncates (never reallocates). Payload:
+ * the array. */
+#define ark_darray_resize(Da_, Sz_)                                            \
+	__ark_darray_ids3_ (__ark_darray_resize__, Da_, Sz_)
+
+/* Insertion (payload: pointer to the first inserted element)
+ * -------------------------------------*/
+
+/*
+ * push_back takes ONE element and may be a braced initializer with commas:
+ *   ark_darray_push_back (da, 42);
+ *   ark_darray_push_back (da, {.x = 1, .y = 2});
+ * The value is evaluated BEFORE any reallocation, so push_back (da,
+ * da->data[0]) is safe. Buffer forms (append / insert_n) must not alias the
+ * array itself.
+ */
+#define ark_darray_push_back(Da_, ...)                                         \
+	__ark_darray_ids4_ (__ark_darray_push_, Da_, __VA_ARGS__)
+
+/* Insert one element at Idx_ (Idx_ == size appends). O(n - Idx_). */
+#define ark_darray_insert(Da_, Idx_, ...)                                      \
+	__ark_darray_ids4_ (__ark_darray_insert_, Da_, Idx_, __VA_ARGS__)
+
+/* Append / insert Count_ elements copied from the buffer Src_ (element types
+ * must match). */
+#define ark_darray_append(Da_, Src_, Count_)                                   \
+	__ark_darray_ids5__ (                                                      \
+		__ark_darray_insert_n__, Da_, __ark_darray_at_end__, Src_, Count_      \
+	)
+
+#define ark_darray_insert_n(Da_, Idx_, Src_, Count_)                           \
+	__ark_darray_ids5__ (__ark_darray_insert_n__, Da_, Idx_, Src_, Count_)
+
+/* Removal (Da_ may be an rvalue: removal never relocates the array)
+ * ------------------------------*/
+
+/*
+ * pop_back (da)      removes the last element. Payload: pointer to the removed
+ * slot (valid until the next mutation). pop_back (da, n)   removes the last n
+ * elements. Payload: pointer to the first removed slot. Fails with OUT_OF_RANGE
+ * on NULL / too few elements.
+ */
+#define ark_darray_pop_back(...)                                               \
+	__ark_darray_dispatch_ (__ark_darray_pop_back_, __VA_ARGS__)
+
+/* Value form: returns the popped element, or Default_ when empty / NULL. */
+#define ark_darray_pop_back_or(Da_, Default_)                                  \
+	__ark_darray_ids1_ (__ark_darray_pop_back_or__, Da_, Default_)
+
+/* Remove [Idx_, Idx_ + Count_), keeping order. O(n). Payload: the array. For
+ * the front use erase (da, 0, n); for queues prefer a ring buffer. */
+#define ark_darray_erase(Da_, Idx_, Count_)                                    \
+	__ark_darray_ids4_ (__ark_darray_erase__, Da_, Idx_, Count_)
+
+/* O(1) unordered removal: the last element takes Idx_'s place. Payload: the
+ * array. */
+#define ark_darray_swap_remove(Da_, Idx_)                                      \
+	__ark_darray_ids3_ (__ark_darray_swap_remove__, Da_, Idx_)
+
+/* Access
+ * -----------------------------------------------------------------------------------------*/
+
+/* Asserting pointer access (bounds check compiled out like $assert_internal).
+ */
+#define ark_darray_ptr(Da_, Idx_)                                              \
+	__ark_darray_ids2_ (__ark_darray_ptr__, Da_, Idx_)
+
+/* Lvalue: ark_darray_at (da, i) = 5;  &ark_darray_at (da, i);  big structs are
+ * not copied. */
+#define ark_darray_at(Da_, Idx_) (*ark_darray_ptr (Da_, Idx_))
+
+#define ark_darray_set(Da_, Idx_, Elem_)                                       \
+	do {                                                                       \
+		ark_darray_at (Da_, Idx_) = (Elem_);                                   \
+	} while (0)
+
+/* Always-checked access. Payload: pointer to the element; OUT_OF_RANGE
+ * otherwise. */
+#define ark_darray_get(Da_, Idx_)                                              \
+	__ark_darray_ids3_ (__ark_darray_get__, Da_, Idx_)
+
+/* Asserting front / back. */
+#define ark_darray_front(Da_) ark_darray_at (Da_, 0)
+#define ark_darray_back(Da_)                                                   \
+	(*__ark_darray_ids1_ (__ark_darray_back_ptr__, Da_))
+
+/* Algorithms
+ * -------------------------------------------------------------------------------------*/
+
+/* Compar_ must really be `int (const void*, const void*)` (ark_compar_fn_t). */
+#define ark_darray_sort(Da_, Compar_)                                          \
+	__ark_darray_ids1_ (__ark_darray_sort__, Da_, Compar_)
+
+/*
+ * contains (da, target)            scalar elements, operator ==
+ * contains (da, target, pred)      bool pred (const Elem*, Target)
+ */
+#define ark_darray_contains(...)                                               \
+	__ark_darray_dispatch_ (__ark_darray_contains_, __VA_ARGS__)
+
+/*------------------------------------------------------------------------------------------------------
+ * Internal symbols
+ *
+ * Conventions: `dap_` = pointer TO the darray variable (so the array can be
+ re-pointed after a
+ * realloc without a T** -> U** cast), `da_` = darray pointer value, `r_` =
+ result, other ids come
+ * from ark_pp_unique_id. Arguments marked "internal" must be side-effect free.
+ -----------------------------------------------------------------------------------------------------*/
+
+/* Arity dispatch: name_ ## nargs ## __ */
+#define __ark_darray_dispatch_(name_, ...)                                     \
+	ark_pp_concat (name_, ark_pp_nargs (__VA_ARGS__), __) (__VA_ARGS__)
+
+/* Pass N fresh unique identifiers ahead of the user arguments. */
+#define __ark_darray_ids1_(macro_, ...)                                        \
+	macro_ (ark_pp_unique_id (ark_a_), __VA_ARGS__)
+
+#define __ark_darray_ids2_(macro_, ...)                                        \
+	macro_ (ark_pp_unique_id (ark_a_), ark_pp_unique_id (ark_b_), __VA_ARGS__)
+
+#define __ark_darray_ids3_(macro_, ...)                                        \
+	macro_ (                                                                   \
+		ark_pp_unique_id (ark_a_),                                             \
+		ark_pp_unique_id (ark_b_),                                             \
+		ark_pp_unique_id (ark_c_),                                             \
+		__VA_ARGS__                                                            \
+	)
+
+#define __ark_darray_ids4_(macro_, ...)                                        \
+	macro_ (                                                                   \
+		ark_pp_unique_id (ark_a_),                                             \
+		ark_pp_unique_id (ark_b_),                                             \
+		ark_pp_unique_id (ark_c_),                                             \
+		ark_pp_unique_id (ark_d_),                                             \
+		__VA_ARGS__                                                            \
+	)
+
+#define __ark_darray_ids5__(macro_, ...)                                       \
+	macro_ (                                                                   \
+		ark_pp_unique_id (ark_a_),                                             \
+		ark_pp_unique_id (ark_b_),                                             \
+		ark_pp_unique_id (ark_c_),                                             \
+		ark_pp_unique_id (ark_d_),                                             \
+		ark_pp_unique_id (ark_e_),                                             \
+		__VA_ARGS__                                                            \
+	)
+
+/* Layout / type helpers (dap_ is a pointer to the darray variable) */
+#define __ark_darray_elem_t_(dap_) typeof_unqual ((*(dap_))->data[0])
+#define __ark_darray_esz_(dap_)	   sizeof ((*(dap_))->data[0])
+
+/* (elem_sz, hdr_sz, alignment) triple expected by the *_fn functions */
+#define __ark_darray_meta_(dap_)                                               \
+	__ark_darray_esz_ (dap_), offsetof (typeof (**(dap_)), data),              \
+		alignof (typeof (**(dap_)))
+
+#define __ark_darray_ok_(dap_) ark_expected (ARK_DARRAY, (u0*)*(dap_))
+
+/*
+ * Largest alignment of `data` provable at compile time: the struct's own
+ * alignment when the offset of `data` is a multiple of it, otherwise the
+ * element alignment. Constant-folded.
+ */
+#define __ark_darray_data_align_(da_)                                          \
+	((offsetof (typeof (*(da_)), data) % alignof (typeof (*(da_))) == 0)       \
+		 ? alignof (typeof (*(da_)))                                           \
+		 : alignof (typeof ((da_)->data[0])))
+
+/* da_: non-NULL darray pointer expression (internal, evaluated twice). */
+#define __ark_darray_data_(da_)                                                \
+	((typeof (&(da_)->data[0]))                                                \
+		 ARK_ASSUME_ALIGNED (&(da_)->data[0], __ark_darray_data_align_ (da_)))
+
+/* Make room for extra_ more elements. The slow path is out of line and cold. */
+#define __ark_darray_ensure_(r_, dap_, extra_)                                 \
+	do {                                                                       \
+		$unlikely (((extra_) > (*(dap_))->capacity - (*(dap_))->size)) {       \
+			r_ = ark_darray_grow_fn (                                          \
+				*(dap_), (extra_), __ark_darray_meta_ (dap_)                   \
+			);                                                                 \
+			if (ark_expect_ok (r_)) *(dap_) = r_.unwrap;                       \
+		}                                                                      \
+	} while (0)
+
+/* Introspection */
+#define __ark_darray_data_checked_(p_, da_)                                    \
+	({                                                                         \
+		auto p_ = (da_);                                                       \
+		p_ ? __ark_darray_data_ (p_) : nullptr;                                \
+	})
+
+#define __ark_darray_end_(p_, da_)                                             \
+	({                                                                         \
+		auto p_ = (da_);                                                       \
+		p_ ? __ark_darray_data_ (p_) + p_->size : nullptr;                     \
+	})
+
+/* Construction / destruction */
+#define __ark_make_darray_1__(Type_)                                           \
+	__ark_darray_make__ (                                                      \
+		ark_pp_unique_id (ark_a_),                                             \
+		Type_,                                                                 \
+		ARK_DARRAY_DEFAULT_ALLOCATOR,                                          \
+		ARK_LC_DARRAY_INITIAL_CAPACITY                                         \
+	)
+
+#define __ark_make_darray_2__(Type_, Alloc_Or_Cap_)                            \
+	__ark_darray_make__ (                                                      \
+		ark_pp_unique_id (ark_a_),                                             \
+		Type_,                                                                 \
+		_Generic (                                                             \
+			(Alloc_Or_Cap_),                                                   \
+			ark_allocator: (Alloc_Or_Cap_),                                    \
+			default: ARK_DARRAY_DEFAULT_ALLOCATOR                              \
+		),                                                                     \
+		_Generic (                                                             \
+			(Alloc_Or_Cap_),                                                   \
+			ark_allocator: ARK_LC_DARRAY_INITIAL_CAPACITY,                     \
+			default: (Alloc_Or_Cap_)                                           \
+		)                                                                      \
+	)
+
+#define __ark_make_darray_3__(Type_, Allocator_, Capacity_)                    \
+	__ark_darray_make__ (                                                      \
+		ark_pp_unique_id (ark_a_), Type_, Allocator_, Capacity_                \
+	)
+
+/* The struct is declared locally so offsetof / alignof see the real layout. */
+#define __ark_darray_make__(id_, Type_, allocator_, capacity_)                 \
+	({                                                                         \
+		[[maybe_unused]] ark_darray (Type_) id_ = nullptr;                     \
+		ark_darray_make_fn (                                                   \
+			(allocator_),                                                      \
+			(capacity_),                                                       \
+			sizeof (id_->data[0]),                                             \
+			offsetof (typeof (*id_), data),                                    \
+			alignof (typeof (*id_))                                            \
+		);                                                                     \
+	})
+
+#define __ark_destroy_darray_1__(Da_)                                          \
+	do {                                                                       \
+		ark_darray_destroy_fn ((Da_));                                         \
+		(Da_) = nullptr;                                                       \
+	} while (0)
+
+#define __ark_destroy_darray_2__(Da_, Dtor_)                                   \
+	__ark_darray_destroy__ (                                                   \
+		ark_pp_unique_id (ark_a_), ark_pp_unique_id (ark_b_), Da_, Dtor_       \
+	)
+
+#define __ark_darray_destroy__(d_, i_, da_, dtor_)                             \
+	do {                                                                       \
+		auto d_ = (da_);                                                       \
+		if (d_) {                                                              \
+			auto data_ = __ark_darray_data_ (d_);                              \
+			for (sz i_ = 0; i_ < d_->size; ++i_)                               \
+				(dtor_) (&data_[i_]);                                          \
+		}                                                                      \
+		ark_darray_destroy_fn (d_);                                            \
+		(da_) = nullptr;                                                       \
+	} while (0)
+
+/* Capacity */
+#define __ark_darray_clear__(p_, da_)                                          \
+	do {                                                                       \
+		auto p_ = (da_);                                                       \
+		if (p_) p_->size = 0;                                                  \
+	} while (0)
+
+#define __ark_darray_reserve__(p_, r_, c_, da_, cap_)                          \
+	({                                                                         \
+		auto				p_ = &(da_);                                       \
+		sz					c_ = (cap_);                                       \
+		ark_darray_expect_t r_ = __ark_darray_ok_ (p_);                        \
+		if (c_ > (*p_)->capacity) {                                            \
+			r_ = ark_darray_reserve_fn (*p_, c_, __ark_darray_meta_ (p_));     \
+			if (ark_expect_ok (r_)) *p_ = r_.unwrap;                           \
+		}                                                                      \
+		r_;                                                                    \
+	})
+
+#define __ark_darray_shrink__(p_, r_, da_)                                     \
+	({                                                                         \
+		auto				p_ = &(da_);                                       \
+		ark_darray_expect_t r_ = ark_darray_reserve_fn (                       \
+			*p_, (*p_)->size, __ark_darray_meta_ (p_)                          \
+		);                                                                     \
+		if (ark_expect_ok (r_)) *p_ = r_.unwrap;                               \
+		r_;                                                                    \
+	})
+
+#define __ark_darray_resize__(p_, r_, n_, da_, sz_)                            \
+	({                                                                         \
+		auto				p_ = &(da_);                                       \
+		sz					n_ = (sz_);                                        \
+		ark_darray_expect_t r_ = __ark_darray_ok_ (p_);                        \
+		if (n_ > (*p_)->size) {                                                \
+			__ark_darray_ensure_ (r_, p_, n_ - (*p_)->size);                   \
+			if (ark_expect_ok (r_)) {                                          \
+				ARK_MEMSET (                                                   \
+					__ark_darray_data_ (*p_) + (*p_)->size,                    \
+					0,                                                         \
+					(n_ - (*p_)->size) * __ark_darray_esz_ (p_)                \
+				);                                                             \
+				(*p_)->size = n_;                                              \
+				r_			= __ark_darray_ok_ (p_);                           \
+			}                                                                  \
+		} else {                                                               \
+			(*p_)->size = n_;                                                  \
+		}                                                                      \
+		r_;                                                                    \
+	})
+
+/* Insertion. push is the hot path: no index math, no memmove. */
+#define __ark_darray_push_(p_, r_, i_, v_, da_, ...)                           \
+	({                                                                         \
+		auto p_						 = &(da_);                                 \
+		__ark_darray_elem_t_ (p_) v_ = __VA_ARGS__;                            \
+		sz					i_		 = (*p_)->size;                            \
+		ark_darray_expect_t r_		 = __ark_darray_ok_ (p_);                  \
+		__ark_darray_ensure_ (r_, p_, 1);                                      \
+		if (ARK_LIKELY (ark_expect_ok (r_))) {                                 \
+			__ark_darray_data_ (*p_)[i_] = v_;                                 \
+			(*p_)->size					 = i_ + 1;                             \
+			r_							 = ark_expected (                      \
+				ARK_DARRAY, (u0*)&__ark_darray_data_ (*p_)[i_]                 \
+			);                                                                 \
+		}                                                                      \
+		r_;                                                                    \
+	})
+
+#define __ark_darray_insert_(p_, r_, i_, v_, da_, idx_, ...)                   \
+	({                                                                         \
+		auto p_						 = &(da_);                                 \
+		__ark_darray_elem_t_ (p_) v_ = __VA_ARGS__;                            \
+		sz					i_		 = (idx_);                                 \
+		ark_darray_expect_t r_		 = __ark_darray_ok_ (p_);                  \
+		if (i_ == __ark_darray_at_end__) i_ = (*p_)->size;                     \
+		$unlikely ((i_ > (*p_)->size)) {                                       \
+			r_ = ark_darray_range_error_fn ();                                 \
+		}                                                                      \
+		else {                                                                 \
+			__ark_darray_ensure_ (r_, p_, 1);                                  \
+			if (ARK_LIKELY (ark_expect_ok (r_))) {                             \
+				if (i_ < (*p_)->size)                                          \
+					ARK_MEMMOVE (                                              \
+						__ark_darray_data_ (*p_) + i_ + 1,                     \
+						__ark_darray_data_ (*p_) + i_,                         \
+						((*p_)->size - i_) * __ark_darray_esz_ (p_)            \
+					);                                                         \
+				__ark_darray_data_ (*p_)[i_] = v_;                             \
+				(*p_)->size++;                                                 \
+				r_ = ark_expected (                                            \
+					ARK_DARRAY, (u0*)&__ark_darray_data_ (*p_)[i_]             \
+				);                                                             \
+			}                                                                  \
+		}                                                                      \
+		r_;                                                                    \
+	})
+
+#define __ark_darray_insert_n__(p_, r_, i_, n_, s_, da_, idx_, src_, count_)   \
+	({                                                                         \
+		auto p_							  = &(da_);                            \
+		const typeof_unqual (*(src_))* s_ = (src_);                            \
+		$static_assert (                                                       \
+			$typematch (typeof ((*p_)->data[0]), typeof (*s_)),                \
+			"darray: source element type does not match the darray element "   \
+			"type"                                                             \
+		);                                                                     \
+		sz					i_ = (idx_);                                       \
+		sz					n_ = (count_);                                     \
+		ark_darray_expect_t r_ = __ark_darray_ok_ (p_);                        \
+		if (i_ == __ark_darray_at_end__) i_ = (*p_)->size;                     \
+		$unlikely ((i_ > (*p_)->size)) {                                       \
+			r_ = ark_darray_range_error_fn ();                                 \
+		}                                                                      \
+		else {                                                                 \
+			__ark_darray_ensure_ (r_, p_, n_);                                 \
+			if (ARK_LIKELY (ark_expect_ok (r_))) {                             \
+				if (n_ > 0) {                                                  \
+					if (i_ < (*p_)->size)                                      \
+						ARK_MEMMOVE (                                          \
+							__ark_darray_data_ (*p_) + i_ + n_,                \
+							__ark_darray_data_ (*p_) + i_,                     \
+							((*p_)->size - i_) * __ark_darray_esz_ (p_)        \
+						);                                                     \
+					ARK_MEMCPY (                                               \
+						__ark_darray_data_ (*p_) + i_,                         \
+						s_,                                                    \
+						n_ * __ark_darray_esz_ (p_)                            \
+					);                                                         \
+					(*p_)->size += n_;                                         \
+				}                                                              \
+				r_ = ark_expected (                                            \
+					ARK_DARRAY, (u0*)(__ark_darray_data_ (*p_) + i_)           \
+				);                                                             \
+			}                                                                  \
+		}                                                                      \
+		r_;                                                                    \
+	})
+
+/* Removal */
+#define __ark_darray_pop_back_1__(Da_) __ark_darray_pop_back_2__ (Da_, 1)
+
+#define __ark_darray_pop_back_2__(Da_, Count_)                                 \
+	__ark_darray_ids3_ (__ark_darray_pop_back_, Da_, Count_)
+
+#define __ark_darray_pop_back_(p_, r_, n_, da_, count_)                        \
+	({                                                                         \
+		auto				p_ = (da_);                                        \
+		sz					n_ = (count_);                                     \
+		ark_darray_expect_t r_;                                                \
+		$unlikely ((!p_ || n_ > p_->size)) {                                   \
+			r_ = ark_darray_range_error_fn ();                                 \
+		}                                                                      \
+		else {                                                                 \
+			p_->size -= n_;                                                    \
+			/* pointer arithmetic: may be one-past */                          \
+			r_ = ark_expected (                                                \
+				ARK_DARRAY, (u0*)(__ark_darray_data_ (p_) + p_->size)          \
+			);                                                                 \
+		}                                                                      \
+		r_;                                                                    \
+	})
+
+#define __ark_darray_pop_back_or__(p_, da_, default_)                          \
+	({                                                                         \
+		auto p_ = (da_);                                                       \
+		(p_ && p_->size) ? __ark_darray_data_ (p_)[--p_->size] : (default_);   \
+	})
+
+#define __ark_darray_erase__(p_, r_, i_, n_, da_, idx_, count_)                \
+	({                                                                         \
+		auto				p_ = (da_);                                        \
+		sz					i_ = (idx_);                                       \
+		sz					n_ = (count_);                                     \
+		ark_darray_expect_t r_;                                                \
+		$unlikely ((!p_ || i_ > p_->size || n_ > p_->size - i_)) {             \
+			r_ = ark_darray_range_error_fn ();                                 \
+		}                                                                      \
+		else {                                                                 \
+			if (n_ > 0) {                                                      \
+				ARK_MEMMOVE (                                                  \
+					__ark_darray_data_ (p_) + i_,                              \
+					__ark_darray_data_ (p_) + i_ + n_,                         \
+					(p_->size - i_ - n_) * sizeof (p_->data[0])                \
+				);                                                             \
+				p_->size -= n_;                                                \
+			}                                                                  \
+			r_ = ark_expected (ARK_DARRAY, (u0*)p_);                           \
+		}                                                                      \
+		r_;                                                                    \
+	})
+
+#define __ark_darray_swap_remove__(p_, r_, i_, da_, idx_)                      \
+	({                                                                         \
+		auto				p_ = (da_);                                        \
+		sz					i_ = (idx_);                                       \
+		ark_darray_expect_t r_;                                                \
+		$unlikely ((!p_ || i_ >= p_->size)) {                                  \
+			r_ = ark_darray_range_error_fn ();                                 \
+		}                                                                      \
+		else {                                                                 \
+			p_->size--;                                                        \
+			__ark_darray_data_ (p_)[i_] = __ark_darray_data_ (p_)[p_->size];   \
+			r_							= ark_expected (ARK_DARRAY, (u0*)p_);  \
+		}                                                                      \
+		r_;                                                                    \
+	})
+
+/* Access */
+#define __ark_darray_ptr__(p_, i_, da_, idx_)                                  \
+	({                                                                         \
+		auto p_ = (da_);                                                       \
+		sz	 i_ = (idx_);                                                      \
+		$assert_internal (                                                     \
+			p_ && i_ < p_->size && "darray: index out of bounds"               \
+		);                                                                     \
+		&__ark_darray_data_ (p_)[i_];                                          \
+	})
+
+#define __ark_darray_get__(p_, r_, i_, da_, idx_)                              \
+	({                                                                         \
+		auto				p_ = (da_);                                        \
+		sz					i_ = (idx_);                                       \
+		ark_darray_expect_t r_;                                                \
+		$unlikely ((!p_ || i_ >= p_->size)) {                                  \
+			r_ = ark_darray_range_error_fn ();                                 \
+		}                                                                      \
+		else {                                                                 \
+			r_ = ark_expected (ARK_DARRAY, (u0*)&__ark_darray_data_ (p_)[i_]); \
+		}                                                                      \
+		r_;                                                                    \
+	})
+
+#define __ark_darray_back_ptr__(p_, da_)                                       \
+	({                                                                         \
+		auto p_ = (da_);                                                       \
+		$assert_internal (                                                     \
+			p_ && p_->size > 0 && "darray: back() on empty array"              \
+		);                                                                     \
+		&__ark_darray_data_ (p_)[p_->size - 1];                                \
+	})
+
+/* Algorithms */
+#define __ark_darray_sort__(p_, da_, compar_)                                  \
+	do {                                                                       \
+		$static_assert (                                                       \
+			_Generic ((compar_), ark_compar_fn_t: true, default: false),       \
+			"darray_sort: comparator must be int (*)(const void*, const "      \
+			"void*)"                                                           \
+		);                                                                     \
+		auto p_ = (da_);                                                       \
+		if (p_ && p_->size > 1)                                                \
+			qsort (                                                            \
+				__ark_darray_data_ (p_),                                       \
+				p_->size,                                                      \
+				sizeof (p_->data[0]),                                          \
+				(compar_)                                                      \
+			);                                                                 \
+	} while (0)
+
+#define __ark_darray_contains_2__(Da_, Target_)                                \
+	__ark_darray_ids4_ (__ark_darray_contains_eq_, Da_, Target_)
+
+#define __ark_darray_contains_3__(Da_, Target_, Compar_)                       \
+	__ark_darray_ids4_ (__ark_darray_contains_pred_, Da_, Target_, Compar_)
+
+#define __ark_darray_contains_eq_(d_, t_, f_, i_, da_, target_)                \
+	({                                                                         \
+		auto d_ = (da_);                                                       \
+		auto t_ = (target_);                                                   \
+		bool f_ = false;                                                       \
+		if (d_) {                                                              \
+			auto data_ = __ark_darray_data_ (d_);                              \
+			for (sz i_ = 0; i_ < d_->size; ++i_) {                             \
+				if (data_[i_] == t_) {                                         \
+					f_ = true;                                                 \
+					break;                                                     \
+				}                                                              \
+			}                                                                  \
+		}                                                                      \
+		f_;                                                                    \
+	})
+
+#define __ark_darray_contains_pred_(d_, t_, f_, i_, da_, target_, compar_)     \
+	({                                                                         \
+		auto d_ = (da_);                                                       \
+		auto t_ = (target_);                                                   \
+		bool f_ = false;                                                       \
+		if (d_) {                                                              \
+			auto data_ = __ark_darray_data_ (d_);                              \
+			for (sz i_ = 0; i_ < d_->size; ++i_) {                             \
+				if ((compar_)(&data_[i_], t_)) {                               \
+					f_ = true;                                                 \
+					break;                                                     \
+				}                                                              \
+			}                                                                  \
+		}                                                                      \
+		f_;                                                                    \
+	})
+
+/*------------------------------------------------------------------------------------------------------
+ * Functions (arkdarray.c)
+ *
+ * All of these: failure never invalidates the array passed in.
+ -----------------------------------------------------------------------------------------------------*/
+
+ARKAPI __decl_nodiscard__ ark_darray_expect_t ark_darray_make_fn (
+	ark_allocator allocator_,
+	sz			  capacity_,
+	sz			  elem_sz_,
+	sz			  hdr_sz_,
+	sz			  alignment_
+) __attr_noexcept__;
+
+/* Sets capacity to exactly `capacity_` (>= size). */
+ARKAPI __decl_nodiscard__ ark_darray_expect_t ark_darray_reserve_fn (
+	u0* da_, sz capacity_, sz elem_sz_, sz hdr_sz_, sz alignment_
+) __attr_noexcept__;
+
+/* Amortised growth so that at least `extra_` more elements fit. Cold: keeps the
+ * inlined fast path compact. */
+ARKAPI __decl_nodiscard__ __decl_cold__ ark_darray_expect_t ark_darray_grow_fn (
+	u0* da_, sz extra_, sz elem_sz_, sz hdr_sz_, sz alignment_
+) __attr_noexcept__;
+
+ARKAPI __decl_nodiscard__ __decl_cold__ ark_darray_expect_t
+	ark_darray_range_error_fn (u0) __attr_noexcept__;
+
+/* NULL-safe; deallocates through the allocator stored in the array. */
+ARKAPI u0 ark_darray_destroy_fn (u0* __nullable__ da_) __attr_noexcept__;
+
+/* __attr_cleanup__ target. Reads the pointer with memcpy: no `T**` -> `U**`
+ * aliasing cast. */
+__decl_static_inline__ u0 ark_darray_cleanup_fn (u0* da_) __attr_noexcept__ {
+	u0* ptr;
+	ARK_MEMCPY (&ptr, da_, sizeof ptr);
+	ark_darray_destroy_fn (ptr);
+}
+
+ARK_END
+
+#endif /* ARK_DARRAY_H_ */

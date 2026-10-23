@@ -1,0 +1,73 @@
+#ifndef ARK_INTERFACES_ITERATOR_H_
+#define ARK_INTERFACES_ITERATOR_H_
+
+#include "core/arkdef.h"
+
+ARK_BEGIN
+
+#define ___ARK__ITER_TYPEDEFS__                                                                                        \
+	___ARK_ITER_TYPEDEF__ (void, init, const void*)                                                                    \
+	___ARK_ITER_TYPEDEF__ (const void*, begin, const void*)                                                            \
+	___ARK_ITER_TYPEDEF__ (const void*, end, const void*)                                                              \
+	___ARK_ITER_TYPEDEF__ (const void*, next, const void*)                                                             \
+	___ARK_ITER_TYPEDEF__ (const void*, prev, const void*)                                                             \
+	___ARK_ITER_TYPEDEF__ (const void*, peek, const void*)                                                             \
+	___ARK_ITER_TYPEDEF__ (void, rewind, const void*)                                                                  \
+	___ARK_ITER_TYPEDEF__ (void, traverse, const void*)
+
+#define ___ARK_ITER_TYPEDEF__(Return_Type_, Func_Id_, ...)                                                             \
+	typedef $fn (Return_Type_, ARK_CONCAT_3 (ark_iter_, Func_Id_, _fn), __VA_ARGS__);
+___ARK__ITER_TYPEDEFS__
+#undef ___ARK_ITER_TYPEDEF__
+
+#define ark_iter_init(Iterable_Obj_) (Iterable_Obj_)->iterator->init (Iterable_Obj_)
+
+#define ark_iter_begin(Iterable_Obj_) (Iterable_Obj_)->iterator->begin (Iterable_Obj_)
+
+#define ark_iter_end(Iterable_Obj_) (Iterable_Obj_)->iterator->end (Iterable_Obj_)
+
+#define ark_iter_next(Iterable_Obj_) (Iterable_Obj_)->iterator->next (Iterable_Obj_)
+
+#define ark_iter_prev(Iterable_Obj_) (Iterable_Obj_)->iterator->prev (Iterable_Obj_)
+
+#define ark_iter_peek(Iterable_Obj_) (Iterable_Obj_)->iterator->peek (Iterable_Obj_)
+
+#define ark_iter_rewind(iterable_obj_) (iterable_obj_)->iterator->rewind (iterable_obj_)
+
+#define ark_iter_traverse(iterable_obj_) (iterable_obj_)->iterator->traverse (iterable_obj_)
+
+#define ark_iter_offset(Iterable_Obj_) (Iterable_Obj_)->iterator->state.offset
+
+#define ark_iter_current(Iterable_Obj_) (Iterable_Obj_)->iterator->state.current
+
+#define ark_iter_elemsz(Iterable_Obj_) (Iterable_Obj_)->iterator->state.elem_sz
+
+#define ark_iter_start(Iterable_Obj_) (ark_iter_begin (Iterable_Obj_) - ark_iter_elemsz (Iterable_Obj_))
+
+typedef enum : uint8_t {
+	ARK_LINEAR_ITERATOR,
+	ARK_BIDIRECTIONAL_ITERATOR,
+} ark_iter_family;
+
+class (ark_iterator_state) {
+	const void* current;
+	ptrdiff_t	offset;
+	usz			elem_sz;
+	usz			buffer_sz;
+};
+
+class (ark_iterator) {
+	ark_iterator_state	 state;
+	ark_iter_init_fn	 init;
+	ark_iter_begin_fn	 begin;
+	ark_iter_end_fn		 end;
+	ark_iter_next_fn	 next;
+	ark_iter_prev_fn	 prev;
+	ark_iter_peek_fn	 peek;
+	ark_iter_rewind_fn	 rewind;
+	ark_iter_traverse_fn traverse;
+};
+
+ARK_END
+
+#endif /* ARK_INTERFACES_ITERATOR_H_ */
