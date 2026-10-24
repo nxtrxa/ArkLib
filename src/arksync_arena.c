@@ -16,6 +16,8 @@
 
 ARK_BEGIN
 
+#define ARK_EXPECT_CONTEXT ARK_SYNC_ARENA
+
 #define SCOPED_MUTEX_OP(Arena_)                                                                                        \
 	pthread_mutex_lock (&(Arena_)->_lock);                                                                             \
 	defer {                                                                                                            \
@@ -267,9 +269,9 @@ ARKINTERNAL u0* arena_alloc_slow (ark_sync_arena* __noalias__ arena_, sz size_, 
  */
 
 
-__decl_overloadable__ ark_expect (ARK_SYNC_ARENA, ark_sync_arena_p) ark_make_sync_arena (sz cap_, flag_t flags_) {
+__decl_overloadable__ ark_expect (ark_sync_arena_p) ark_make_sync_arena (sz cap_, flag_t flags_) {
 	ark_sync_arena* arena = ark_talloc (arena);
-	if (!arena) return ark_unexpected (ARK_SYNC_ARENA, MALLOC, "failed to allocated arena object");
+	if (!arena) return ark_unexpected (MALLOC, "failed to allocated arena object");
 
 	/* Ensure minimum _size. */
 	if (cap_ == 0) cap_ = LC_ARENA_DEFAULT_REGION_SIZE;
@@ -283,12 +285,12 @@ __decl_overloadable__ ark_expect (ARK_SYNC_ARENA, ark_sync_arena_p) ark_make_syn
 	if (pthread_mutex_init (&arena->_lock, nullptr) != 0) {
 		region_destroy (first);
 		ark_dealloc (arena);
-		return ark_unexpected (ARK_SYNC_ARENA, MUTEX_INIT, "failed to initialize mutex lock");
+		return ark_unexpected (MUTEX_INIT, "failed to initialize mutex lock");
 	}
 
 	ARK_INFO ("ark_sync_arena created with capacity of: %zu", (size_t)cap_);
 
-	return ark_expected (ARK_SYNC_ARENA, arena);
+	return ark_expected (arena);
 }
 
 u0 ark_destroy_sync_arena (ark_sync_arena* __restrict__ arena_) {

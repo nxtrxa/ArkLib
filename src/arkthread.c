@@ -9,6 +9,8 @@
 
 ARK_BEGIN
 
+#define ARK_EXPECT_CONTEXT ARK_THREAD
+
 struct class_ark_thread {
 	pthread_t _handler;
 	ark_atomic_t (bool) _stop_req;
@@ -35,9 +37,9 @@ ARKINTERNAL u0* ark_thread_trampoline (u0* raw_) {
 	return nullptr;
 }
 
-ark_expect (ARK_THREAD, ark_thread_p) ark_make_thread (ark_thread_fn_t fn_, u0* arg_) {
+ARKEXPORT ark_expect (ark_thread*) ark_make_thread (ark_thread_fn_t __nonnull__ fn_, u0* arg_) {
 	ark_thread* thr = ark_talloc (thr);
-	if (!thr) return ark_unexpected (ARK_THREAD, MALLOC, "failed to malloc <thread> object");
+	if (!thr) return ark_unexpected (OUT_OF_MEMORY);
 
 	atomic_init (&thr->_stop_req, false);
 	thr->_joined = false;
@@ -45,7 +47,7 @@ ark_expect (ARK_THREAD, ark_thread_p) ark_make_thread (ark_thread_fn_t fn_, u0* 
 	struct trampoline_arg* ta = ark_talloc (ta);
 	if (!ta) {
 		ark_dealloc (thr);
-		return ark_unexpected (ARK_THREAD, MALLOC, "failed to malloc <trampoline_arg> object");
+		return ark_unexpected (OUT_OF_MEMORY);
 	}
 
 	ta->_fn	 = fn_;
@@ -54,10 +56,10 @@ ark_expect (ARK_THREAD, ark_thread_p) ark_make_thread (ark_thread_fn_t fn_, u0* 
 
 	if (pthread_create (&thr->_handler, nullptr, ark_thread_trampoline, ta) != 0) {
 		ark_dealloc (thr, ta);
-		return ark_unexpected (ARK_THREAD, PTHREAD_CREATE, "`pthread_create` failed");
+		return ark_unexpected (PTHREAD_CREATE);
 	}
 
-	return ark_expected (ARK_THREAD, thr);
+	return ark_expected (thr);
 }
 
 ARKEXPORT u0 ark_destroy_thread_fn (ark_thread* thr_) {

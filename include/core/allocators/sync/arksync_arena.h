@@ -50,12 +50,14 @@ ARK_BEGIN
 		};                                                                                                             \
 	})
 
-#define ark_class_sync_arena(Exception_Handler_, Arena_, ...)                                                          \
+#define ark_class_sync_arena(FaultHandler_, Arena_, ...)                                                               \
 	__attr_cleanup__ (ark_sync_arena_cleanup) ark_sync_arena* Arena_                                                   \
-		= ark_catch (ark_make_sync_arena (__VA_ARGS__), ___except__, Exception_Handler_ (___except__))
+		= ark_catch (ark_make_sync_arena (__VA_ARGS__), __ark_fault_, FaultHandler_ (__ark_fault_))
 
 #define ark_class_sync_arena_unsafe(Arena_, ...)                                                                       \
 	__attr_cleanup__ (ark_sync_arena_cleanup) ark_sync_arena* Arena_ = ark_make_sync_arena (__VA_ARGS__).unwrap
+
+#define ARK_EXPECT_CONTEXT ARK_SYNC_ARENA
 
 enum __attr_flag_enum__ : flag_t {
 	ARK_SYNC_ARENA_DEFAULT		 = 0,
@@ -67,25 +69,26 @@ enum __attr_flag_enum__ : flag_t {
 ARK_CLASS (ark_sync_arena);
 struct region;
 
-ARK_DECL_FAULTS (ARK_SYNC_ARENA, MALLOC, MUTEX_INIT);
+
+ark_faultdefs (MALLOC, MUTEX_INIT);
 
 ARKAPI const ark_allocator_vtable ark_sync_arena_allocator_vtable;
 
 ARKAPI __decl_overloadable__ __decl_malloc__ __decl_nodiscard__
-	ark_expect (ARK_SYNC_ARENA, ark_sync_arena_p) ark_make_sync_arena (sz cap_, flag_t flags_) __attr_noexcept__;
+ark_expect (ark_sync_arena*) ark_make_sync_arena (sz cap_, flag_t flags_) __attr_noexcept__;
 
 __decl_static_inline__ __decl_overloadable__ __decl_malloc__ __decl_nodiscard__
-ark_expect (ARK_SYNC_ARENA, ark_sync_arena_p) ark_make_sync_arena (u0) __attr_noexcept__ {
+ark_expect (ark_sync_arena*) ark_make_sync_arena (u0) __attr_noexcept__ {
 	return ark_make_sync_arena (0, ARK_SYNC_ARENA_DEFAULT);
 }
 
 __decl_static_inline__ __decl_overloadable__ __decl_malloc__ __decl_nodiscard__
-ark_expect (ARK_SYNC_ARENA, ark_sync_arena_p) ark_make_sync_arena (sz cap_) __attr_noexcept__ {
+ark_expect (ark_sync_arena*) ark_make_sync_arena (sz cap_) __attr_noexcept__ {
 	return ark_make_sync_arena (cap_, ARK_SYNC_ARENA_DEFAULT);
 }
 
 __decl_static_inline__ __decl_overloadable__ __decl_malloc__ __decl_nodiscard__
-ark_expect (ARK_SYNC_ARENA, ark_sync_arena_p) ark_make_sync_arena (flag_t flags_) __attr_noexcept__ {
+ark_expect (ark_sync_arena*) ark_make_sync_arena (flag_t flags_) __attr_noexcept__ {
 	return ark_make_sync_arena (0, flags_);
 }
 
@@ -100,6 +103,8 @@ ARKAPI __decl_malloc__ __decl_returns_nonnull__ __decl_nodiscard__ u0* ark_sync_
 __decl_static_inline__ u0 ark_sync_arena_cleanup (ark_sync_arena** __noalias__ arena_) {
 	ark_destroy_sync_arena (*arena_);
 }
+
+#undef ARK_EXPECT_CONTEXT
 
 ARK_END
 

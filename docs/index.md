@@ -2,9 +2,12 @@
 
 A **General purpose** C library
 
-[About](/docs/about)
+[About](about)
 
 ```
+#define ARK_NAMESPACE
+#import "ark/arklib.h"
+
 int main () {
 	monotonic_buffer (mbuff); // declares a static buffer
 

@@ -63,6 +63,7 @@
 	#import "core/arkstring.h"
 	#import "core/arkstring_stream.h"
 	#import "core/arkstring_view.h"
+	#import "core/arktagged_union.h"
 	#import "core/arkthread.h"
 	#import "core/arkwstring.h"
 	#import "core/arkwstring_stream.h"

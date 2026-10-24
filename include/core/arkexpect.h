@@ -33,8 +33,8 @@
 ARK_BEGIN
 
 #ifdef ARK_NAMESPACE
-	#define FAULT	   ARK_FAULT
 	#define fault	   ark_fault
+	#define fault_last ark_fault_last
 	#define faultdefs  ark_faultdefs
 	#define expect	   ark_expect
 	#define expected   ark_expected
@@ -42,12 +42,7 @@ ARK_BEGIN
 	#define unwrap_or  ark_unwrap_or
 #endif
 
-#define ARK_FAULT_ID(Fault_) ark_pp_concat (ARK_EXPECT_CONTEXT, _, Fault_)
-
-#define ARK_DECL_FAULT_SEQ(Fault_) ARK_FAULT_ID (Fault_) = __COUNTER__ + 1,
-
-#define ARK_DECL_FAULT_TABLE(Fault_) [ARK_FAULT_ID (Fault_)] = ark_pp_stringfy (ARK_FAULT_ID (Fault_)),
-
+#define ark_fault_typename(Fault_) ark_pp_concat (ARK_EXPECT_CONTEXT, _, Fault_)
 
 #define ark_expect_typename struct ark_pp_concat (ARK_EXPECT_, ARK_EXPECT_CONTEXT)
 
@@ -63,9 +58,7 @@ ARK_BEGIN
  * macro must be defined before this macro is used.
  */
 #define ark_faultdefs(...)                                                                                             \
-	enum ark_pp_concat (ARK_EXPECT_CONTEXT, _FAULTS) { ark_pp_foreach (ARK_DECL_FAULT_SEQ, __VA_ARGS__) }
-
-// static CString ark_expect_table[] = {ark_pp_foreach (ARK_DECL_FAULT_TABLE, __VA_ARGS__)}
+	enum ark_pp_concat (ARK_EXPECT_CONTEXT, _FAULTS) { ark_pp_foreach (__ark_decl_fault_seq_, __VA_ARGS__) }
 
 static constexpr int ARK_FAULT_SUCCESS = 0;
 
@@ -101,61 +94,56 @@ ARK_CLASS (ark_fault) {
 
 #define ark_unexpected(...) ark_pp_concat (ark_unexpected_, ark_pp_nargs (__VA_ARGS__)) (__VA_ARGS__)
 
+
 #define ark_unexpected_1(Fault_)                                                                                       \
 	({                                                                                                                 \
-		ARK_FAULT = (ark_fault) {                                                                                      \
-			.to_str = #Fault_,                                                                                         \
-			._file	= $file,                                                                                           \
-			._func	= $fnsig,                                                                                          \
-			._line	= $line,                                                                                           \
-			._ctx	= ark_pp_stringfy (ARK_EXPECT_CONTEXT),                                                            \
-			._errno = errno,                                                                                           \
-			._value = ARK_FAULT_ID (Fault_),                                                                           \
-		};                                                                                                             \
+		ark_expect_set_fault (                                                                                         \
+			#Fault_, $file, $fnsig, ark_pp_stringfy (ARK_EXPECT_CONTEXT), $line, ark_fault_typename (Fault_)           \
+		);                                                                                                             \
 		(ark_expect_typename) {                                                                                        \
-			._fault = ARK_FAULT_ID (Fault_),                                                                           \
+			._fault = ark_fault_typename (Fault_),                                                                     \
 		};                                                                                                             \
 	})
 
 #define ark_unexpected_2(Fault_, Msg_)                                                                                 \
 	({                                                                                                                 \
-		ARK_FAULT = (ark_fault) {                                                                                      \
-			.to_str = #Fault_,                                                                                         \
-			._file	= $file,                                                                                           \
-			._func	= $fnsig,                                                                                          \
-			._line	= $line,                                                                                           \
-			._ctx	= ark_pp_stringfy (ARK_EXPECT_CONTEXT),                                                            \
-			._msg	= (Msg_),                                                                                          \
-			._errno = errno,                                                                                           \
-			._value = ARK_FAULT_ID (Fault_),                                                                           \
-		};                                                                                                             \
+		ark_expect_set_fault (                                                                                         \
+			#Fault_, $file, $fnsig, ark_pp_stringfy (ARK_EXPECT_CONTEXT), Msg_, $line, ark_fault_typename (Fault_)     \
+		);                                                                                                             \
 		(ark_expect_typename) {                                                                                        \
-			._fault = ARK_FAULT_ID (Fault_),                                                                           \
+			._fault = ark_fault_typename (Fault_),                                                                     \
 		};                                                                                                             \
 	})
 
 #define ark_expect_on_succes(Fault_) $likely ((Fault_) == ARK_FAULT_SUCCESS)
 #define ark_expect_on_fault(Fault_)	 $unlikely ((Fault_) == ARK_FAULT_SUCCESS)
 
-#define $catch(FnCall_, ExceptObj_, ...) __ark_catch_ (ark_pp_unique_id (__result_), FnCall_, (ExceptObj_), __VA_ARGS__)
+#define $catch(FnCall_, Fault_, ...) __ark_catch_ (ark_pp_unique_id (__result_), FnCall_, (Fault_), __VA_ARGS__)
 
-#define __ark_catch_(R_, FnCall_, ExceptObj_, ...)                                                                     \
+#define __ark_decl_fault_seq_(Fault_) ark_fault_typename (Fault_) = __COUNTER__ + 1,
+
+#define __ark_catch_(R_, FnCall_, Fault_, ...)                                                                         \
 	({                                                                                                                 \
 		auto R_ = (FnCall_);                                                                                           \
 		ark_expect_on_fault (R_._fault) {                                                                              \
-			__decl_unused__ auto ExceptObj_ = ARK_FAULT;                                                               \
+			__decl_unused__ auto Fault_ = ark_expect_fault ();                                                         \
 			__VA_ARGS__;                                                                                               \
 			ARK_TRAP ();                                                                                               \
 		}                                                                                                              \
 		R_.unwrap;                                                                                                     \
 	})
 
-ARKAPI thread_local ark_fault ARK_FAULT;
 
-// __decl_nodiscard__ __decl_cold__ __decl_pure__ __decl_static_inline__ ark_fault ark_raise_fault (int value_) {
-// 	return ARK_FAULT;
-// }
+ARKAPI thread_local ark_fault ark_fault_last;
 
+ARKAPI __decl_overloadable__ __decl_nodiscard__ __decl_cold__ __decl_pure__ u0
+ark_expect_set_fault (CString to_str_, CString file_, CString fnsig_, CString ctx_, u32 line_, int value_);
+
+ARKAPI __decl_overloadable__ __decl_nodiscard__ __decl_cold__ __decl_pure__ u0 ark_expect_set_fault (
+	CString to_str_, CString file_, CString fnsig_, CString ctx_, CString msg_, u32 line_, int value_
+);
+
+ARKAPI __decl_nodiscard__ __decl_cold__ __decl_pure__ ark_fault ark_expect_fault () __attr_noexcept__;
 
 ARK_END
 

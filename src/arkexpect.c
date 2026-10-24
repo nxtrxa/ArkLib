@@ -4,40 +4,38 @@
 
 ARK_BEGIN
 
-ARKEXPORT thread_local __ark_exception_last_t_ ark_exception_last;
+ARKEXPORT thread_local ark_fault ark_fault_last = {};
 
-ARKEXPORT u0 ark_exception_raise (const __ark_exception_site_t_* site_, int value_) {
-	/* errno is read here, once, on the failure path only. */
-	ark_exception_last = (__ark_exception_last_t_) {
-		._site	= site_,
-		._value = value_,
+ARKEXPORT u0 __decl_overloadable__
+ark_expect_set_fault (CString to_str_, CString file_, CString fnsig_, CString ctx_, u32 line_, int value_) {
+	ark_fault_last = (ark_fault) {
+		.to_str = to_str_,
+		._file	= file_,
+		._func	= fnsig_,
+		._line	= line_,
+		._ctx	= ctx_,
 		._errno = errno,
+		._value = value_,
 	};
 }
 
-ARKEXPORT ark_exception ark_exception_from (int value_) {
-	const __ark_exception_last_t_* last = &ark_exception_last;
-
-	if (last->_site && last->_value == value_) {
-		return (ark_exception) {
-			._to_str = last->_site->_to_str,
-			._msg	 = last->_site->_msg,
-			._ctx	 = last->_site->_ctx,
-			._file	 = last->_site->_file,
-			._value	 = value_,
-			._errno	 = last->_errno,
-			._line	 = last->_site->_line,
-		};
-	}
-
-	/* Stale or minimal build: only the numeric value is known. */
-	return (ark_exception) {
-		._to_str = "unknown",
-		._msg	 = "",
-		._ctx	 = "unknown",
-		._file	 = "",
-		._value	 = value_,
+ARKEXPORT u0 __decl_overloadable__ ark_expect_set_fault (
+	CString to_str_, CString file_, CString fnsig_, CString ctx_, CString msg_, u32 line_, int value_
+) {
+	ark_fault_last = (ark_fault) {
+		.to_str = to_str_,
+		._file	= file_,
+		._func	= fnsig_,
+		._line	= line_,
+		._ctx	= ctx_,
+		._msg	= msg_,
+		._errno = errno,
+		._value = value_,
 	};
+}
+
+ARKEXPORT ark_fault ark_expect_fault (u0) {
+	return ark_fault_last;
 }
 
 ARK_END

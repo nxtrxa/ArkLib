@@ -1,6 +1,6 @@
 # ArkLib - About
 
-[Index](/docs/index)
+[Index](index)
 
 **feature test project**
 

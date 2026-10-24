@@ -43,9 +43,9 @@ ARK_BEGIN
 		};                                                                                                             \
 	})
 
-#define ark_class_async_arena(Exception_Handler_, Arena_, ...)                                                         \
+#define ark_class_async_arena(FaultHandler_, Arena_, ...)                                                              \
 	__attr_cleanup__ (ark_async_arena_cleanup) ark_async_arena* Arena_                                                 \
-		= ark_catch (ark_make_async_arena (__VA_ARGS__), ___except__, Exception_Handler_ (___except__))
+		= ark_catch (ark_make_async_arena (__VA_ARGS__), __ark_fault_, FaultHandler_ (__ark_fault_))
 
 #define ark_class_async_arena_unsafe(Arena_, ...)                                                                      \
 	__attr_cleanup__ (ark_async_arena_cleanup) ark_async_arena* Arena_ = ark_make_async_arena (__VA_ARGS__).unwrap
